@@ -1,4 +1,4 @@
-.PHONY: build up start down clean logs ps help
+.PHONY: build up start down clean logs ps test help
 
 ## Build all images (must run before `make up`)
 build:
@@ -38,6 +38,16 @@ logs:
 ## Show running containers
 ps:
 	docker compose ps
+
+## Run backend, session-agent and frontend tests + lint in throwaway containers
+test:
+	docker run --rm -v "$(CURDIR)":/src:ro -w /work python:3.12-slim sh -c '\
+	  cp -a /src/backend /src/session_agent /src/.env.example /work/ && \
+	  pip install -q --root-user-action=ignore -r backend/requirements-dev.txt && \
+	  (cd backend && python -m pytest -q) && (cd session_agent && python -m pytest -q) && \
+	  (cd backend && ruff check . ../session_agent && ruff format --check . ../session_agent)'
+	docker run --rm -v "$(CURDIR)/frontend":/src:ro -w /work node:22-bookworm-slim sh -c '\
+	  cp -a /src/. /work/ && npm ci --no-audit --no-fund && npm test && npm run lint'
 
 ## Show help
 help:

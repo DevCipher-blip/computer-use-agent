@@ -1,392 +1,283 @@
-# Computer-use session platform
+# ComputeAgent: isolated computer-use sessions for Claude
 
-## Trace a session before scaling it
+ComputeAgent runs Claude's computer-use agent as a small multi-session service. Each session
+gets its own Docker container with a virtual desktop. A FastAPI backend creates and tracks the
+containers. The browser UI streams every step of a task (text, tool calls, screenshots) as it
+happens, and shows the live desktop through noVNC. Finished tasks are stored in PostgreSQL, so a
+session's history survives page reloads and backend restarts.
 
-A session moves from the HTTP API through the session manager into a dedicated agent container, with messages persisted and activity streamed back to the client. Start with [session lifecycle management](backend/services/session_manager.py) and [the Docker adapter](backend/services/docker_manager.py).
+![Agent feed after a task, desktop layout](docs/screenshots/feed-desktop.png)
 
-The architecture separates orchestration from the agent loop, which makes container failures and session recovery concrete review topics. Capacity is still bounded by the Docker host, model-provider quotas, and per-session resources. Authentication, container privileges, network access, and retention of screenshots/conversation data should be explicit deployment decisions.
+## What is in this repository
 
-## Architecture Overview
+| Path | What it is | Author |
+|---|---|---|
+| `backend/` | FastAPI API: sessions, Docker manager, stream relay, Postgres models, tests | This project |
+| `session_agent/` | Small FastAPI server that runs inside each session container and wraps the sampling loop | This project |
+| `frontend/` | Static browser UI (`public/`) plus its Vitest/ESLint setup | This project |
+| `nginx.conf`, `docker-compose.yml`, `Makefile`, `.env.example` | Wiring | This project |
+| `computer-use-demo/` | [Anthropic's computer-use-demo quickstart](https://github.com/anthropics/claude-quickstarts/tree/main/computer-use-demo), unmodified. It provides the desktop image and `computer_use_demo.loop.sampling_loop` | Anthropic, MIT licence in `computer-use-demo/LICENSE` |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Browser (HTML/JS)                     │
-│         REST API calls  +  WebSocket stream                  │
-└────────────────────────┬────────────────────────────────────┘
-                         │ HTTP / WS
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     Nginx  :80                               │
-│   /            → Static frontend                             │
-│   /api/*       → FastAPI backend :8000                       │
-│   /api/.../stream → WebSocket proxy (upgrade)                │
-│   /novnc/{port}/  → noVNC proxy to session container         │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  FastAPI Backend  :8000                       │
-│                                                              │
-│  ┌─────────────────┐    ┌──────────────────────────────┐    │
-│  │   PostgreSQL     │    │       Docker SDK              │    │
-│  │  Sessions +      │    │  spawn_session_container()    │    │
-│  │  Messages (ORM)  │    │  asyncio.Lock port allocator  │    │
-│  └─────────────────┘    └──────────────┬───────────────┘    │
-└─────────────────────────────────────────┼───────────────────┘
-                                          │ one container per session
-                    ┌─────────────────────┼──────────────────────┐
-                    │                     │                        │
-          ┌─────────▼──────┐   ┌──────────▼─────┐   ┌───────────▼──────┐
-          │   Session A     │   │   Session B     │   │   Session N...   │
-          │  Xfce Desktop   │   │  Xfce Desktop   │   │  Xfce Desktop    │
-          │  VNC  :5901     │   │  VNC  :5902     │   │  VNC  :590N      │
-          │  noVNC :6081    │   │  noVNC :6082    │   │  noVNC :608N     │
-          │  Agent :8765    │   │  Agent :8765    │   │  Agent :8765     │
-          │  (internal)     │   │  (internal)     │   │  (internal)      │
-          └─────────────────┘   └─────────────────┘   └──────────────────┘
-```
+The session image is Anthropic's quickstart image with `session_agent/` layered on top. The
+agent replaces the quickstart's Streamlit UI with an HTTP and WebSocket API.
 
-### Key Design Decisions
+## Screenshots
 
-| Decision | Rationale |
+| | |
 |---|---|
-| **One Docker container per session** | True process + filesystem isolation. A crash in one session cannot affect any other. Each container has its own X11 display, VNC server, and agent process. |
-| **Dynamic container spawning (no fixed pool)** | `DockerManager.spawn_session_container()` is called on demand. There is no hardcoded session limit — the system scales to as many sessions as the host can support. |
-| **`asyncio.create_task` dispatch** | `send_message_to_session()` fires `_dispatch()` as a background task and returns 202 immediately. The second session's task begins before the first has taken a single screenshot. |
-| **WebSocket proxy (backend ↔ container)** | Single ingress point through Nginx. No cross-origin issues. The backend intercepts `done` events to persist messages to PostgreSQL before forwarding. |
-| **PostgreSQL + async SQLAlchemy** | Full conversation history survives backend restarts. Async throughout — zero blocking calls on the event loop. |
-| **`asyncio.Lock` port allocation** | Simultaneous session creates cannot race for the same port. Ports are recovered from the DB on restart so no conflicts after a reboot. |
-| **`session_agent.py` replaces Streamlit** | Lightweight FastAPI server running inside each container. Wraps Anthropic's `sampling_loop`, streams every step via WebSocket, and calls `/complete` on the backend when done. |
+| ![Welcome screen with an empty session list](docs/screenshots/welcome-desktop.png) | ![New session dialog](docs/screenshots/new-session-desktop.png) |
+| ![History tab showing the stored task and answer](docs/screenshots/history-desktop.png) | ![Mobile layout with the sidebar stacked above the feed](docs/screenshots/feed-mobile.png) |
 
----
+The screenshots come from a stub stack: the real backend, nginx, UI and session agent, with the
+Docker client mocked and a scripted fake model in place of Claude. The desktop images in the feed
+are generated placeholders, and the "31°C in Dubai" answer is scripted.
 
-## Sequence Diagrams
+## Architecture
 
-### Creating a Session and Sending a Task
+```mermaid
+flowchart LR
+    B[Browser UI] -- "REST + WS (?token=)" --> N[nginx :80]
+    N -- "/api/*" --> API[FastAPI backend]
+    N -- "/novnc/{session-id}/" --> NV
+    API -- SQL --> PG[(PostgreSQL)]
+    API -- "Docker SDK via /var/run/docker.sock" --> D[Docker daemon]
+    D -- "one container per session" --> C
+    subgraph C[Session container]
+        SA[session_agent :8765] --> L[sampling_loop + tools]
+        L --> X[Xvfb desktop]
+        NV[noVNC :6080] --> X
+    end
+    API -- "POST /run, WS /stream (agent secret)" --> SA
+    SA -- "POST /complete (agent secret)" --> API
+```
+
+A task, end to end:
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant N as Nginx
-    participant F as FastAPI Backend
-    participant D as Docker
-    participant C as Session Container
-
-    B->>N: POST /api/v1/sessions
-    N->>F: POST /api/v1/sessions
-    F->>F: allocate VNC + noVNC ports (asyncio.Lock)
-    F->>F: INSERT session → PostgreSQL
-    F->>D: containers.run(session-agent image)
-    D->>C: start Xfce + VNC + noVNC + session_agent
-    F->>C: poll GET /health (up to 90s)
-    C-->>F: 200 OK
-    F-->>B: 201 { session_id, novnc_url, ... }
-
-    B->>N: WS /api/v1/sessions/{id}/stream
-    N->>F: WS upgrade
-    F->>C: WS connect to container /stream
-    C-->>B: { type: status, status: idle }
-
-    B->>N: POST /api/v1/sessions/{id}/message
-    N->>F: POST /api/v1/sessions/{id}/message
-    F-->>B: 202 Accepted
-    F->>F: asyncio.create_task(_dispatch)
-    F->>C: POST /run { task }
-
-    loop sampling_loop (Claude)
-        C-->>B: { type: output, data: text/tool_use }
-        C-->>B: { type: tool_result, base64_image }
+    participant F as Backend
+    participant C as Session container
+    B->>F: POST /sessions {api_key, model, tool_version}
+    F->>F: check session cap, insert row
+    F->>C: containers.run(session-agent image)
+    F-->>B: 201 {id, access_token, vnc_info}
+    B->>F: WS /sessions/{id}/stream?token=...
+    F->>C: WS /stream (Authorization: agent secret)
+    B->>F: POST /sessions/{id}/message
+    F->>F: idle -> running (single conditional UPDATE)
+    F-->>B: 202
+    F->>C: POST /run {task}
+    loop sampling_loop
+        C-->>B: output / tool_result events (relayed by the backend)
     end
-
-    C-->>F: { type: done, messages }
-    F->>F: persist messages → PostgreSQL
-    F-->>B: { type: done, status: idle }
+    C->>F: POST /complete {messages of this task}
+    F->>F: store assistant turn, running -> idle
+    C-->>B: done
 ```
 
-### Concurrent Sessions (Non-Blocking)
+### Design choices
 
-```mermaid
-sequenceDiagram
-    participant A as Browser A
-    participant B as Browser B
-    participant F as FastAPI Backend
-    participant CA as Container A
-    participant CB as Container B
+- **One container per session.** Each session has its own process tree, X display, filesystem
+  and VNC server. A crash in one session's desktop or agent does not affect the others (but see
+  the VNC caveat under Known limitations).
+- **Sessions are capabilities.** There are no user accounts. Creating a session returns a
+  random bearer token once, and the database keeps only its SHA-256. Every session route, the
+  stream and the history require that token. A wrong token gets the same 404 as an unknown id.
+  There is no endpoint that lists every session. The browser keeps its own id-to-token map.
+- **The container never sees the user's token.** The backend and each session agent share a
+  separate per-session secret. Session containers sit on one Docker network, so without this
+  secret any container (including another session, where Claude can run shell commands) could
+  drive a neighbour's agent.
+- **The agent reports results; the stream only relays them.** When a task finishes, the agent
+  posts that task's messages (screenshots stripped) to `/complete`. The backend stores them once
+  and frees the session. History is saved whether or not anyone is watching. The WebSocket
+  endpoint just relays events, so any number of viewers can be connected.
+- **Bounded capacity.** `MAX_CONCURRENT_SESSIONS` is enforced when sessions are created (HTTP 429
+  over the limit). Each container gets memory, CPU and PID limits.
+- **No host ports for noVNC.** nginx routes `/novnc/{session-id}/` to the container named
+  `computeagent-session-{session-id}` over the Docker network. The route only accepts a UUID, so
+  it cannot be pointed at other services on the host. The password-less VNC port is published on
+  `127.0.0.1` only, for native VNC clients on the Docker host.
 
-    A->>F: POST /sessions
-    F->>CA: spawn container A
-    F-->>A: 201 session_id_A
+## Running it
 
-    B->>F: POST /sessions
-    F->>CB: spawn container B
-    F-->>B: 201 session_id_B
-
-    A->>F: POST /sessions/A/message (Dubai weather)
-    F-->>A: 202 Accepted
-    F-)CA: asyncio.create_task → POST /run
-
-    B->>F: POST /sessions/B/message (NY weather)
-    F-->>B: 202 Accepted
-    F-)CB: asyncio.create_task → POST /run
-
-    par Container A runs independently
-        CA-->>A: streaming events (screenshots, tool calls)
-    and Container B runs independently
-        CB-->>B: streaming events (screenshots, tool calls)
-    end
-
-    CA-->>F: done → persist to DB
-    CB-->>F: done → persist to DB
-```
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Docker ≥ 24 with Docker Compose v2
-- `make` (GNU Make)
-- An [Anthropic API key](https://platform.anthropic.com/settings/keys) with credits
-
-### Build & Run
+Prerequisites: Docker 24 or newer with Compose v2, GNU Make, and an Anthropic API key.
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd computeagent-computer-use
-cp .env.example .env   # then set POSTGRES_PASSWORD
-
-# Build all images and start the full stack (~5–10 min on first run)
-make up
-
-# Open the UI
-open http://localhost
+cp .env.example .env      # then set POSTGRES_PASSWORD
+make up                   # builds three images, then starts postgres, backend and nginx
 ```
 
-| Service | URL |
+The first `make up` builds Anthropic's desktop image (Ubuntu, Firefox, LibreOffice, a pyenv
+Python), which takes a while. After that:
+
+| | |
 |---|---|
-| **Frontend UI** | http://localhost |
-| **API (REST + WebSocket)** | http://localhost/api/v1 |
-| **Interactive API Docs** | http://localhost:8000/docs |
+| UI | http://localhost |
+| API | http://localhost/api/v1 |
+| OpenAPI docs | http://127.0.0.1:8000/docs (loopback only) |
 
-### Shut Down
+`make down` stops the stack and keeps the database. `make clean` also removes the volume and
+images. The schema is created at startup and there are no migrations, so after upgrading from an
+older checkout, run `make clean` once.
 
-```bash
-make down        # Stop all services (data preserved in postgres volume)
-make clean       # Full reset — stop, delete volumes and images
-```
+> **The backend mounts the Docker socket.** It needs the socket to start session containers.
+> That gives it root-equivalent control of the host, so run the stack only on a machine or VM set
+> aside for it.
 
----
+### Using the UI
 
-## Usage
+1. Paste your API key in the sidebar and save it. By default it is kept for the current tab only.
+   Tick "Remember on this device" to keep it in `localStorage`.
+2. Click **New session** and pick a model. The matching computer-use tool version is selected for
+   you. Starting a container takes a little while.
+3. Type a task and press Enter. The **Agent feed** shows Claude's text, each tool call and each
+   screenshot (click a screenshot to enlarge it).
+4. **Live desktop** shows the session's screen through noVNC. **History** shows the stored
+   conversation.
+5. **Terminate** stops and removes the container.
 
-### 1. Enter your API key
-Paste your Anthropic API key once in the **sidebar** at the bottom. It is saved to browser localStorage — you will never be asked again.
+## API
 
-### 2. Create a session
-Click **New Session**, choose a model and tool version, and click **Create Session**. A Docker container spins up automatically (~45 seconds for the first session).
+All routes are under `/api/v1`. Session routes need `Authorization: Bearer <access_token>`.
 
-### 3. Send tasks
-Type any natural-language instruction in the **Agent Feed** input and press **Send** (or Enter). Watch Claude's every action — screenshots, tool calls, and reasoning — stream in real time.
-
-### 4. Watch the live desktop
-Click the **VNC Desktop** tab to see the virtual machine Claude is controlling, live in your browser.
-
-### 5. Concurrent sessions
-Open a second browser window at the same URL, create another session, and send a different task. Both run in fully isolated containers **simultaneously** — there is no queue.
-
----
-
-## API Reference
-
-All endpoints are prefixed `/api/v1`.
-
-### Sessions
-
-| Method | Path | Description |
+| Method | Path | Notes |
 |---|---|---|
-| `POST` | `/sessions` | Create a session and dynamically spawn a container |
-| `GET` | `/sessions` | List all sessions with pagination |
-| `GET` | `/sessions/{id}` | Get session details including VNC connection info |
-| `POST` | `/sessions/{id}/message` | Send a task to the agent — returns `202 Accepted` immediately |
-| `GET` | `/sessions/{id}/history` | Retrieve full persisted conversation history |
-| `DELETE` | `/sessions/{id}` | Terminate session and destroy the container |
+| `POST` | `/sessions` | Start a session. Returns `access_token` once. 422 on bad input, 429 at the session cap |
+| `GET` | `/sessions/{id}` | Status and desktop links |
+| `POST` | `/sessions/{id}/message` | Send a task. Returns 202, or 400 if the session is not idle |
+| `GET` | `/sessions/{id}/history` | Stored user tasks and assistant replies |
+| `DELETE` | `/sessions/{id}` | Stop and remove the container. Repeating it is a no-op |
+| `WS` | `/sessions/{id}/stream?token=...` | Live events (below) |
+| `GET` | `/health` | Liveness |
 
-### Real-Time Stream
+`POST /sessions/{id}/complete` also exists. Only the session's own agent can call it, and it is
+left out of the OpenAPI schema.
 
-```
-WS  /api/v1/sessions/{id}/stream
-```
+These examples were captured through nginx on the stub stack. Tokens are shortened.
 
-Connect at any time before or after sending a message. The stream auto-reconnects if the connection drops. Events emitted:
+```http
+POST /api/v1/sessions
+{"api_key": "sk-ant-...", "model": "claude-sonnet-4-5-20250929", "tool_version": "computer_use_20250124"}
 
-```jsonc
-// Claude text output
-{ "type": "output", "data": { "type": "text", "text": "..." } }
-
-// Tool call (e.g. mouse click, keyboard input)
-{ "type": "output", "data": { "type": "tool_use", "name": "computer", "input": { "action": "screenshot" } } }
-
-// Tool result — includes live screenshot thumbnail
-{ "type": "tool_result", "tool_id": "...", "output": "...", "base64_image": "<png>" }
-
-// Task complete
-{ "type": "done", "messages": [...], "status": "idle" }
-
-// Status transition
-{ "type": "status", "status": "running | idle | connecting | connected" }
-
-// Error
-{ "type": "error", "message": "..." }
-```
-
-### Example — Full Flow with curl
-
-```bash
-# 1. Create a session
-SESSION=$(curl -s -X POST http://localhost/api/v1/sessions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "api_key": "sk-ant-...",
-    "model": "claude-sonnet-4-5-20250929",
-    "tool_version": "computer_use_20250124"
-  }' | jq -r .id)
-
-echo "Session: $SESSION"
-
-# 2. Send a task
-curl -X POST http://localhost/api/v1/sessions/$SESSION/message \
-  -H 'Content-Type: application/json' \
-  -d '{"text": "Search the weather in Dubai"}'
-
-# 3. Stream events (requires websocat)
-websocat ws://localhost/api/v1/sessions/$SESSION/stream
+201 Created
+{
+  "id": "76cda938-bc86-4d0c-bf9e-b3c60489475b",
+  "status": "idle",
+  "model": "claude-sonnet-4-5-20250929",
+  "provider": "anthropic",
+  "tool_version": "computer_use_20250124",
+  "vnc_info": {
+    "vnc_host": "127.0.0.1",
+    "vnc_port": 5901,
+    "novnc_url": "/novnc/76cda938-bc86-4d0c-bf9e-b3c60489475b/vnc.html?autoconnect=true&resize=scale&path=novnc/76cda938-bc86-4d0c-bf9e-b3c60489475b/websockify"
+  },
+  "created_at": "2026-11-09T21:00:42.695668",
+  "updated_at": "2026-11-09T21:00:42.700221",
+  "access_token": "eggKMb…Rxoc"
+}
 ```
 
----
+```http
+GET /api/v1/sessions/76cda938-…            (no Authorization header)
+401 {"detail": "Missing session token"}
 
-## Concurrency — How It Works
+GET /api/v1/sessions/76cda938-…            (Authorization: Bearer wrong)
+404 {"detail": "Session not found"}
 
-The concurrent session requirement is addressed at every layer:
+POST /api/v1/sessions/76cda938-…/message   {"text": "Search the weather in Dubai"}
+202 {"id": "0287f9e7-…", "session_id": "76cda938-…", "role": "user",
+     "content": [{"type": "text", "text": "Search the weather in Dubai"}], "created_at": "…"}
 
-### Container level
-Every session gets its own Docker container via `DockerManager.spawn_session_container()`. There is no shared process, no shared display, and no shared filesystem between sessions.
-
-```python
-# backend/services/docker_manager.py
-async def spawn_session_container(self, session_id, api_key, model, tool_version):
-    vnc_port, novnc_port = await self._allocate_ports()   # asyncio.Lock protected
-    container = self.client.containers.run(
-        image=settings.session_agent_image,
-        name=f"computeagent-{session_id[:8]}",
-        detach=True,
-        network=settings.docker_network,
-        ...
-    )
+POST /api/v1/sessions/76cda938-…/message   {"text": "again"}   (while running)
+400 {"detail": "Session not idle (status: running)"}
 ```
 
-### Dispatch level
-`send_message_to_session()` uses `asyncio.create_task()` — it returns the HTTP 202 response **before** the container even receives the task. Session B's dispatch fires before Session A takes its first screenshot.
+Stream events, in the order the stub run produced them (screenshots shortened):
 
-```python
-# backend/services/session_manager.py
-asyncio.create_task(
-    _dispatch(str(session.id), session.container_ip, text)
-)
-return msg   # 202 returned immediately
+```json
+{"type": "status", "status": "connecting", "message": "Waiting for container…"}
+{"type": "status", "status": "connected", "message": "Container ready"}
+{"type": "status", "status": "running"}
+{"type": "output", "data": {"type": "text", "text": "I'll work on this: … First I'll take a screenshot to see the desktop."}}
+{"type": "output", "data": {"type": "tool_use", "id": "toolu_stub_01", "name": "computer", "input": {"action": "screenshot"}}}
+{"type": "tool_result", "tool_id": "toolu_stub_01", "output": null, "error": null, "base64_image": "iVBORw0KGgo…", "system": null}
+{"type": "output", "data": {"type": "text", "text": "The search results show 31°C and clear skies in Dubai right now. …"}}
+{"type": "done", "messages": ["…this task's messages…"], "status": "idle"}
+{"type": "status", "status": "idle"}
 ```
 
-### Port allocation
-An `asyncio.Lock` ensures that even if two session-create requests arrive at the exact same millisecond, they cannot be allocated the same VNC or noVNC port.
-
-### Race condition protection
-- Session status transitions are guarded by atomic DB commits
-- Concurrent `POST /message` requests to the same idle session are safely rejected if status ≠ `idle`
-- On backend restart, `recover_active_sessions()` reloads all allocated ports from the DB
-
----
-
-## Project Structure
-
-```
-computeagent-computer-use/
-│
-├── backend/                        FastAPI application
-│   ├── main.py                     App entry-point, lifespan hooks
-│   ├── config.py                   Pydantic settings (env vars)
-│   ├── database.py                 Async SQLAlchemy engine + session factory
-│   ├── models.py                   Session + Message ORM models
-│   ├── schemas.py                  Pydantic v2 request/response schemas
-│   ├── routers/
-│   │   ├── sessions.py             CRUD REST endpoints
-│   │   └── stream.py               WebSocket proxy endpoint
-│   ├── services/
-│   │   ├── docker_manager.py       Dynamic container spawn/kill, port allocation
-│   │   └── session_manager.py      Session lifecycle, DB updates, non-blocking dispatch
-│   ├── requirements.txt
-│   └── Dockerfile
-│
-├── session_agent/                  Runs inside each session container
-│   ├── session_agent.py            FastAPI + WebSocket server wrapping sampling_loop
-│   ├── entrypoint.sh               Starts Xfce, VNC, noVNC, then session_agent
-│   ├── requirements.txt
-│   └── Dockerfile                  Extends Anthropic computer-use-base image
-│
-├── computer-use-demo/              Anthropic quickstart (unmodified base)
-│
-├── frontend/
-│   └── index.html                  Single-page UI — vanilla JS, no build step
-│
-├── docker-compose.yml              Postgres + Backend + Nginx
-├── nginx.conf                      Reverse proxy + WS upgrade + noVNC proxy
-├── Makefile                        build / up / down / clean / logs / ps
-└── .env.example                    All configurable environment variables
-```
-
----
+If a run fails, the stream gets `{"type": "error", "message": …}`. The failure is also stored in
+the history as an assistant message, and the session returns to `idle`.
 
 ## Configuration
 
-All settings are environment variables. Copy `.env.example` to `.env` to override defaults.
+Compose reads `.env`. Every variable is documented in `.env.example`, and a test checks the
+file against the backend's settings.
 
-| Variable | Default | Description |
+| Variable | Default | Meaning |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+asyncpg://cambio:<password>@postgres/cambio` | Async PostgreSQL connection string |
-| `DOCKER_NETWORK` | `computeagent_network` | Docker network shared by backend and session containers |
-| `SESSION_AGENT_IMAGE` | `computeagent/session-agent:latest` | Container image spawned per session |
-| `SESSION_AGENT_PORT` | `8765` | Internal HTTP/WS port for the session agent |
-| `VNC_BASE_PORT` | `5900` | Starting host port for VNC port allocation |
-| `NOVNC_BASE_PORT` | `6080` | Starting host port for noVNC port allocation |
-| `CONTAINER_READY_TIMEOUT` | `90` | Seconds to wait for container health before failing |
+| `POSTGRES_PASSWORD` | required | Password for the bundled Postgres; Compose builds `DATABASE_URL` from it |
+| `DATABASE_URL` | set by Compose | Async SQLAlchemy URL, needed only outside Compose |
+| `DOCKER_NETWORK` | `computeagent_network` | Network shared by backend, nginx and session containers |
+| `SESSION_AGENT_IMAGE` | `computeagent/session-agent:latest` | Image started for each session |
+| `SESSION_AGENT_PORT` | `8765` | Agent port inside the container |
+| `VNC_BASE_PORT` | `5900` | Session VNC ports are `127.0.0.1:<base+1…base+100>` |
+| `CONTAINER_READY_TIMEOUT` | `90` | Seconds to wait for an agent's `/health` |
+| `MAX_CONCURRENT_SESSIONS` | `20` | Creating, idle and running sessions allowed at once |
+| `SESSION_MEM_LIMIT` / `SESSION_CPUS` / `SESSION_PIDS_LIMIT` | `2g` / `1.0` / `512` | Per-container limits |
+| `CORS_ORIGINS` | `[]` | JSON list of origins allowed to call the API cross-origin |
 
-The **Anthropic API key** is provided per-session at creation time and passed as an environment variable to the container. It is never stored in the database.
+Only Anthropic's API is supported (`provider` must be `anthropic`). The quickstart loop can also
+talk to Bedrock and Vertex, but the session agent always uses the Anthropic provider.
 
----
-
-## Evaluation Criteria
-
-| Criterion | How it is addressed |
-|---|---|
-| **Backend design (40%)** | FastAPI with async SQLAlchemy + PostgreSQL. Docker SDK manages the full session container lifecycle. Clean three-layer service architecture: router → service → infrastructure. |
-| **Real-time streaming (25%)** | WebSocket proxy chain: browser ↔ Nginx ↔ FastAPI backend ↔ session container. Every intermediate Claude step (screenshot, tool call, text) is streamed as it happens. Auto-reconnect on disconnect. |
-| **Code quality (20%)** | Full type hints, Pydantic v2 schemas, async throughout, no blocking calls in the event loop, structured logging, single-worker uvicorn with uvloop. |
-| **Documentation (15%)** | This README, OpenAPI interactive docs at `/docs`, and inline comments for non-obvious logic only. |
-
----
-
-## Local Development (without Docker)
+## Tests
 
 ```bash
-# Start only postgres
-docker-compose up -d postgres
-
-# Run the backend
-cd backend
-pip install -r requirements.txt
-DATABASE_URL=postgresql+asyncpg://cambio:<password>@localhost:5432/cambio \
-  uvicorn main:app --reload --port 8000
-
-# Serve the frontend
-cd frontend && python -m http.server 3000
+make test
 ```
+
+This runs everything in throwaway containers: the backend suite (pytest on SQLite, with a mocked
+Docker client and a fake container socket), the session-agent suite (with a fake sampling loop,
+so it never calls Anthropic), Ruff, and the frontend's Vitest and ESLint. None of the suites needs
+the Docker socket, Postgres or an API key.
+
+| Suite | Covers |
+|---|---|
+| `backend/tests/test_sessions_api.py` | Lifecycle, token isolation, input validation, session cap, run race, completion callback, CORS |
+| `backend/tests/test_docker_manager.py` | Port allocation and release, container naming, limits, loopback publishing, cleanup on failed start |
+| `backend/tests/test_stream.py` | Stream auth, event relay, agent secret on the upstream socket, fail-fast without a container |
+| `session_agent/tests/` | Agent auth, per-task reporting without screenshots, busy refusal, rollback on failure |
+| `frontend/tests/app.test.js` | Session list states, API-key storage, create flow, inert rendering of streamed content, tabs, history errors |
+
+## Known limitations
+
+- **VNC is password-less.** The quickstart starts x11vnc with `-nopw`. The port is not published
+  beyond `127.0.0.1`, but every session container shares one Docker network, so code running in
+  one session could still reach another session's VNC or noVNC port by IP. Fixing this needs
+  per-session networks or VNC passwords.
+- The stream token travels in the WebSocket query string, so it can show up in proxy access logs.
+- The session cap and the port allocator are process-local, so the backend must run as a single
+  uvicorn worker, which is how the image starts it.
+- The session agent keeps its conversation in memory. If a container restarts, Claude loses the
+  earlier context, though the stored history remains.
+
+## Project layout
+
+```
+backend/            FastAPI app: main.py, config.py, models.py, schemas.py, security.py
+  routers/          sessions.py (REST), stream.py (WebSocket relay)
+  services/         session_manager.py (lifecycle), docker_manager.py (containers, ports)
+  tests/
+session_agent/      session_agent.py, entrypoint.sh, Dockerfile (extends the quickstart image), tests/
+frontend/public/    index.html, app.js, styles.css (served as-is by nginx)
+frontend/tests/     Vitest + jsdom
+computer-use-demo/  Anthropic quickstart (third party, unmodified)
+docs/screenshots/
+```
+
+## Licence
+
+MIT. See `LICENSE`. It covers everything except `computer-use-demo/`, which keeps Anthropic's
+own MIT licence and copyright notice.
