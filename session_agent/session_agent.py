@@ -4,6 +4,7 @@ Replaces the Streamlit UI; exposes HTTP + WebSocket API consumed by the main bac
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -12,9 +13,8 @@ from typing import Any
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 
 # computer_use_demo is installed in the base image at /home/computeruse
 sys.path.insert(0, "/home/computeruse")
@@ -25,46 +25,34 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("session_agent")
 
 _BACKEND_URL = os.environ.get("BACKEND_URL", "http://backend:8000")
+# Shared secret with the backend. Session containers sit on one Docker network,
+# so without it any container (including another session's) could drive this one.
+_AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")
 
 
-async def _notify_complete():
-    session_id = os.environ.get("SESSION_ID", "")
-    if not session_id:
-        return
-    headers = {"Authorization": f"Bearer {os.environ.get('SESSION_TOKEN', '')}"}
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(f"{_BACKEND_URL}/api/v1/sessions/{session_id}/complete", headers=headers)
-    except Exception as e:
-        logger.warning(f"Could not notify backend of completion: {e}")
+def _token_ok(presented: str | None) -> bool:
+    return bool(_AGENT_TOKEN) and hmac.compare_digest(presented or "", _AGENT_TOKEN)
+
+
+async def require_backend(authorization: str | None = Header(None)):
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not _token_ok(token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 app = FastAPI(title="Session Agent")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── Shared state (single-session container, no multi-tenancy needed here) ──────
 _messages: list[dict] = []
 _status: str = "idle"
 _clients: list[asyncio.Queue] = []
-_run_lock = asyncio.Lock()
+_background_tasks: set[asyncio.Task] = set()
 
 
-# ── Broadcasting ───────────────────────────────────────────────────────────────
-
-
-def _broadcast_sync(event: dict):
-    """Safe to call from sync callbacks inside sampling_loop (same event loop)."""
+def _broadcast(event: dict):
+    """Fan out to every connected stream; also safe from sampling_loop's sync callbacks."""
     data = json.dumps(event, default=str)
-    for q in list(_clients):
-        try:
-            q.put_nowait(data)
-        except asyncio.QueueFull:
-            pass
-
-
-async def _broadcast(event: dict):
-    data = json.dumps(event, default=str)
-    for q in list(_clients):
+    for q in _clients:
         try:
             q.put_nowait(data)
         except asyncio.QueueFull:
@@ -94,74 +82,82 @@ def _ser_tool_result(result: Any, tool_id: str) -> dict:
     }
 
 
+def _without_images(messages: list[dict]) -> list[dict]:
+    """Drop base64 screenshots: they were already streamed as tool_result events
+    and would blow past WebSocket frame and database row limits."""
+    out = []
+    for m in messages:
+        content = m.get("content", [])
+        if isinstance(content, list):
+            content = [
+                {k: v for k, v in b.items() if k != "base64_image"} if isinstance(b, dict) else b for b in content
+            ]
+        out.append({**m, "content": content})
+    return out
+
+
 # ── Agent loop ─────────────────────────────────────────────────────────────────
 
 
 async def _run_loop(task: str):
-    global _messages, _status
+    global _status
 
-    async with _run_lock:
-        _status = "running"
-
+    turn_start = len(_messages)
     _messages.append({"role": "user", "content": [{"type": "text", "text": task}]})
-    await _broadcast({"type": "status", "status": "running"})
+    _broadcast({"type": "status", "status": "running"})
+    turn: list[dict] = []
+    error: str | None = None
 
     try:
-
-        def output_cb(block):
-            _broadcast_sync({"type": "output", "data": _ser_block(block)})
-
-        def tool_cb(result, tool_id: str):
-            _broadcast_sync(_ser_tool_result(result, tool_id))
-
-        def api_cb(req, resp, err):
-            pass
-
         _messages[:] = await sampling_loop(
             model=os.environ.get("MODEL", "claude-sonnet-4-5-20250929"),
             provider=APIProvider.ANTHROPIC,
             system_prompt_suffix="",
             messages=_messages,
-            output_callback=output_cb,
-            tool_output_callback=tool_cb,
-            api_response_callback=api_cb,
+            output_callback=lambda block: _broadcast({"type": "output", "data": _ser_block(block)}),
+            tool_output_callback=lambda result, tool_id: _broadcast(_ser_tool_result(result, tool_id)),
+            api_response_callback=lambda req, resp, err: None,
             api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
             max_tokens=4096,
-            tool_version=os.environ.get("TOOL_VERSION", "computer_use_20251124"),
+            tool_version=os.environ.get("TOOL_VERSION", "computer_use_20250124"),
         )
-
-        # Strip base64 screenshots before broadcasting — they're already streamed
-        # individually via tool_result events and would exceed WS frame limits
-        def _strip_b64(msgs):
-            out = []
-            for m in msgs:
-                blocks = []
-                for b in m.get("content", []):
-                    if isinstance(b, dict) and b.get("base64_image"):
-                        b = {k: v for k, v in b.items() if k != "base64_image"}
-                    blocks.append(b)
-                out.append({**m, "content": blocks})
-            return out
-
-        await _broadcast({"type": "done", "messages": _strip_b64(_messages), "status": "idle"})
+        # Only this task's messages: the backend already has the earlier turns.
+        turn = _without_images(_messages[turn_start:])
+        _broadcast({"type": "done", "messages": turn, "status": "idle"})
         logger.info("Agent loop completed successfully")
-
     except Exception as e:
         logger.exception("Agent loop error")
-        await _broadcast({"type": "error", "message": str(e), "status": "idle"})
+        error = str(e)
+        # Drop the half-finished turn so the next task starts from a valid conversation.
+        del _messages[turn_start:]
+        _broadcast({"type": "error", "message": error, "status": "idle"})
     finally:
-        async with _run_lock:
-            _status = "idle"
-        await _broadcast({"type": "status", "status": "idle"})
-        # Reliably notify backend — works even if WebSocket dropped
-        await _notify_complete()
+        _status = "idle"
+        _broadcast({"type": "status", "status": "idle"})
+        # Reliably notify backend — works even if no browser is connected.
+        await _notify_complete(turn, error)
+
+
+async def _notify_complete(turn: list[dict], error: str | None):
+    session_id = os.environ.get("SESSION_ID", "")
+    if not session_id:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{_BACKEND_URL}/api/v1/sessions/{session_id}/complete",
+                headers={"Authorization": f"Bearer {_AGENT_TOKEN}"},
+                json={"messages": turn, "error": error},
+            )
+    except Exception as e:
+        logger.warning(f"Could not notify backend of completion: {e}")
 
 
 # ── HTTP endpoints ─────────────────────────────────────────────────────────────
 
 
 class RunRequest(BaseModel):
-    task: str
+    task: str = Field(..., min_length=1)
     session_id: str | None = None
 
 
@@ -170,22 +166,27 @@ async def health():
     return {"status": "ok", "agent_status": _status}
 
 
-@app.post("/run")
+@app.post("/run", dependencies=[Depends(require_backend)])
 async def run(body: RunRequest):
+    global _status
     if _status == "running":
         return {"error": "already_running", "status": _status}
-    asyncio.create_task(_run_loop(body.task))
+    # Set before scheduling, so a second /run arriving first can't slip through.
+    _status = "running"
+    task = asyncio.create_task(_run_loop(body.task))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"status": "started", "task": body.task[:120]}
 
 
-@app.get("/status")
+@app.get("/status", dependencies=[Depends(require_backend)])
 async def get_status():
     return {"status": _status, "message_count": len(_messages)}
 
 
-@app.get("/history")
+@app.get("/history", dependencies=[Depends(require_backend)])
 async def get_history():
-    return {"messages": _messages, "status": _status}
+    return {"messages": _without_images(_messages), "status": _status}
 
 
 # ── WebSocket stream ───────────────────────────────────────────────────────────
@@ -193,6 +194,11 @@ async def get_history():
 
 @app.websocket("/stream")
 async def ws_stream(websocket: WebSocket):
+    scheme, _, token = (websocket.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() != "bearer" or not _token_ok(token):
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     queue: asyncio.Queue = asyncio.Queue(maxsize=500)
     _clients.append(queue)
@@ -208,7 +214,7 @@ async def ws_stream(websocket: WebSocket):
             except TimeoutError:
                 # Heartbeat to keep connection alive
                 await websocket.send_text(json.dumps({"type": "ping"}))
-    except (WebSocketDisconnect, Exception) as e:
+    except (WebSocketDisconnect, RuntimeError) as e:
         logger.debug(f"WS client disconnected: {e}")
     finally:
         if queue in _clients:

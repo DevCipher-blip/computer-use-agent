@@ -3,8 +3,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from models import Message, Session, SessionStatus, utcnow
+from models import Message, Session
 from schemas import (
+    CompleteRunRequest,
     CreatedSessionResponse,
     CreateSessionRequest,
     HistoryResponse,
@@ -13,9 +14,10 @@ from schemas import (
     SessionResponse,
     VNCInfo,
 )
-from security import authorized_session
+from security import agent_session, authorized_session
 from services.session_manager import (
     SessionLimitReached,
+    complete_run,
     create_session,
     send_message_to_session,
     terminate_session,
@@ -88,15 +90,14 @@ async def get_history(session: Session = Depends(authorized_session), db: AsyncS
     return HistoryResponse(session_id=session.id, messages=[MessageResponse.model_validate(m) for m in rows])
 
 
-@router.post("/{session_id}/complete", status_code=200)
+@router.post("/{session_id}/complete", status_code=200, include_in_schema=False)
 async def complete_session(
-    session: Session = Depends(authorized_session), db: AsyncSession = Depends(get_db)
+    body: CompleteRunRequest,
+    session: Session = Depends(agent_session),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Called by session_agent when the sampling loop finishes — ensures status goes back to idle."""
-    if session.status == SessionStatus.RUNNING:
-        session.status = SessionStatus.IDLE
-        session.updated_at = utcnow()
-        await db.commit()
+    """Called by the session agent when its sampling loop finishes."""
+    await complete_run(db, session, body.messages, body.error)
     return {"status": "ok"}
 
 

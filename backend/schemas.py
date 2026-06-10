@@ -24,6 +24,13 @@ class CreateSessionRequest(BaseModel):
     tool_version: ToolVersion = Field("computer_use_20250124", description="Computer-use tool version")
 
 
+class CompleteRunRequest(BaseModel):
+    """Sent by the session agent when a task finishes: that task's messages only."""
+
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+
+
 class SendMessageRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=20_000, description="Task text to send to the agent")
 

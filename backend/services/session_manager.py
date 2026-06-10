@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import AsyncSessionLocal
 from models import Message, Session, SessionStatus, utcnow
-from security import new_session_token
+from security import new_agent_token, new_session_token
 from services.docker_manager import docker_manager
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ async def create_session(
         session = Session(
             id=uuid.uuid4(),
             access_token_hash=token_hash,
+            agent_token=new_agent_token(),
             status=SessionStatus.CREATING,
             model=model,
             provider=provider,
@@ -59,7 +60,7 @@ async def create_session(
         info = await docker_manager.spawn_session_container(
             session_id=str(session.id),
             api_key=api_key,
-            session_token=token,
+            agent_token=session.agent_token,
             model=model,
             tool_version=tool_version,
         )
@@ -98,13 +99,17 @@ async def send_message_to_session(db: AsyncSession, session: Session, text: str)
     await db.commit()
     await db.refresh(msg)
 
-    task = asyncio.create_task(_dispatch(session.id, session.container_ip, text))
+    task = asyncio.create_task(_dispatch(session.id, session.container_ip, session.agent_token, text))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return msg
 
 
-async def _dispatch(session_id: uuid.UUID, container_ip: str, text: str):
+def agent_headers(agent_token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {agent_token}"}
+
+
+async def _dispatch(session_id: uuid.UUID, container_ip: str, agent_token: str, text: str):
     ready = await wait_until_ready(container_ip)
     if not ready:
         await _set_status(session_id, SessionStatus.ERROR)
@@ -116,8 +121,11 @@ async def _dispatch(session_id: uuid.UUID, container_ip: str, text: str):
             resp = await client.post(
                 f"http://{container_ip}:{settings.session_agent_port}/run",
                 json={"task": text, "session_id": str(session_id)},
+                headers=agent_headers(agent_token),
             )
             resp.raise_for_status()
+            if resp.json().get("error"):
+                raise RuntimeError(resp.json()["error"])
     except Exception as e:
         logger.error(f"Dispatch failed for session {session_id}: {e}")
         await _set_status(session_id, SessionStatus.ERROR)
@@ -149,16 +157,22 @@ async def _set_status(session_id: uuid.UUID, status: SessionStatus):
             await db.commit()
 
 
-async def save_assistant_message(session_id: uuid.UUID, content: list):
-    async with AsyncSessionLocal() as db:
-        msg = Message(session_id=session_id, role="assistant", content=content)
-        db.add(msg)
-        result = await db.execute(select(Session).where(Session.id == session_id))
-        session = result.scalar_one_or_none()
-        if session:
-            session.status = SessionStatus.IDLE
-            session.updated_at = utcnow()
-        await db.commit()
+async def complete_run(db: AsyncSession, session: Session, messages: list[dict], error: str | None):
+    """Record a finished task and free the session for the next one.
+
+    Called once per task by the session agent, whether or not a browser was
+    watching the stream. Repeat calls for an already-idle session are ignored.
+    """
+    if session.status != SessionStatus.RUNNING:
+        return
+    blocks = [b for m in messages if m.get("role") == "assistant" for b in m.get("content", [])]
+    if error:
+        blocks.append({"type": "text", "text": f"Run failed: {error}"})
+    if blocks:
+        db.add(Message(session_id=session.id, role="assistant", content=blocks))
+    session.status = SessionStatus.IDLE
+    session.updated_at = utcnow()
+    await db.commit()
 
 
 async def terminate_session(db: AsyncSession, session: Session):

@@ -49,7 +49,7 @@ class DockerManager:
         self,
         session_id: str,
         api_key: str,
-        session_token: str,
+        agent_token: str,
         model: str,
         tool_version: str,
     ) -> dict:
@@ -66,7 +66,7 @@ class DockerManager:
                     "ANTHROPIC_API_KEY": api_key,
                     "SESSION_ID": session_id,
                     "BACKEND_URL": settings.backend_internal_url,
-                    "SESSION_TOKEN": session_token,
+                    "AGENT_TOKEN": agent_token,
                     "MODEL": model,
                     "TOOL_VERSION": tool_version,
                     "DISPLAY_NUM": "1",

@@ -1,0 +1,7 @@
+# Test-only: the real computer_use_demo loop (and its anthropic/streamlit deps)
+# is replaced by a fake in tests, so the base image isn't needed.
+-r requirements.txt
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+httpx2==2.16.0
+ruff==0.17.4

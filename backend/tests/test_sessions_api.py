@@ -19,6 +19,12 @@ async def new_session(api):
     return data["id"], {"Authorization": f"Bearer {data['access_token']}"}
 
 
+def agent_auth(docker_client):
+    """Headers the most recently spawned container would use for its callback."""
+    env = docker_client.containers.run.call_args.kwargs["environment"]
+    return {"Authorization": f"Bearer {env['AGENT_TOKEN']}"}
+
+
 async def test_create_spawns_one_container_and_reports_vnc(api, docker_client):
     r = await create(api)
     assert r.status_code == 201
@@ -36,7 +42,9 @@ async def test_create_spawns_one_container_and_reports_vnc(api, docker_client):
     assert kwargs["environment"]["SESSION_ID"] == data["id"]
     assert kwargs["environment"]["ANTHROPIC_API_KEY"] == "test-key-not-real"
     assert kwargs["labels"]["computeagent.session_id"] == data["id"]
-    assert kwargs["environment"]["SESSION_TOKEN"] == data["access_token"]
+    # The container gets its own agent secret, never the user's session token.
+    assert data["access_token"] not in kwargs["environment"].values()
+    assert len(kwargs["environment"]["AGENT_TOKEN"]) == 64
 
 
 async def test_api_key_is_not_returned_or_stored(api):
@@ -62,7 +70,7 @@ async def test_spawn_failure_marks_session_error(api, docker_client):
     assert statuses == ["error"]
 
 
-async def test_message_runs_session_and_rejects_while_busy(api, no_dispatch):
+async def test_message_runs_session_and_rejects_while_busy(api, docker_client, no_dispatch):
     sid, auth = await new_session(api)
 
     r = await api.post(f"{SESSIONS}/{sid}/message", json={"text": "open the calculator"}, headers=auth)
@@ -75,19 +83,70 @@ async def test_message_runs_session_and_rejects_while_busy(api, no_dispatch):
     busy = await api.post(f"{SESSIONS}/{sid}/message", json={"text": "again"}, headers=auth)
     assert busy.status_code == 400
 
-    done = await api.post(f"{SESSIONS}/{sid}/complete", headers=auth)
+    done = await api.post(f"{SESSIONS}/{sid}/complete", json={}, headers=agent_auth(docker_client))
     assert done.status_code == 200
     assert (await api.get(f"{SESSIONS}/{sid}", headers=auth)).json()["status"] == "idle"
 
 
-async def test_history_lists_user_messages_in_order(api, no_dispatch):
+async def test_history_lists_user_messages_in_order(api, docker_client, no_dispatch):
     sid, auth = await new_session(api)
     await api.post(f"{SESSIONS}/{sid}/message", json={"text": "first"}, headers=auth)
-    await api.post(f"{SESSIONS}/{sid}/complete", headers=auth)
+    await api.post(f"{SESSIONS}/{sid}/complete", json={}, headers=agent_auth(docker_client))
     await api.post(f"{SESSIONS}/{sid}/message", json={"text": "second"}, headers=auth)
 
     history = (await api.get(f"{SESSIONS}/{sid}/history", headers=auth)).json()
     assert [m["content"][0]["text"] for m in history["messages"]] == ["first", "second"]
+
+
+def _turn(*texts):
+    """A finished task as the session agent reports it: user prompt, assistant replies, tool results."""
+    return [
+        {"role": "user", "content": [{"type": "text", "text": "task"}]},
+        *({"role": "assistant", "content": [{"type": "text", "text": t}]} for t in texts),
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": []}]},
+    ]
+
+
+async def test_completion_stores_the_assistant_turn_once(api, docker_client, no_dispatch):
+    sid, auth = await new_session(api)
+    agent = agent_auth(docker_client)
+    await api.post(f"{SESSIONS}/{sid}/message", json={"text": "check the weather"}, headers=auth)
+
+    body = {"messages": _turn("Opening Firefox", "It is 31C in Dubai")}
+    assert (await api.post(f"{SESSIONS}/{sid}/complete", json=body, headers=agent)).status_code == 200
+    # A retried callback must not duplicate the answer.
+    await api.post(f"{SESSIONS}/{sid}/complete", json=body, headers=agent)
+
+    history = (await api.get(f"{SESSIONS}/{sid}/history", headers=auth)).json()["messages"]
+    assert [m["role"] for m in history] == ["user", "assistant"]
+    assert [b["text"] for b in history[1]["content"]] == ["Opening Firefox", "It is 31C in Dubai"]
+    assert (await api.get(f"{SESSIONS}/{sid}", headers=auth)).json()["status"] == "idle"
+
+
+async def test_failed_run_is_recorded_and_session_freed(api, docker_client, no_dispatch):
+    sid, auth = await new_session(api)
+    await api.post(f"{SESSIONS}/{sid}/message", json={"text": "x"}, headers=auth)
+    body = {"messages": [], "error": "overloaded"}
+    await api.post(f"{SESSIONS}/{sid}/complete", json=body, headers=agent_auth(docker_client))
+
+    history = (await api.get(f"{SESSIONS}/{sid}/history", headers=auth)).json()["messages"]
+    assert history[-1]["content"] == [{"type": "text", "text": "Run failed: overloaded"}]
+    assert (await api.get(f"{SESSIONS}/{sid}", headers=auth)).json()["status"] == "idle"
+
+
+async def test_completion_callback_only_accepts_the_agent_secret(api, docker_client, no_dispatch):
+    sid, auth = await new_session(api)
+    other_agent = agent_auth(docker_client)
+    _, _ = await new_session(api)
+    await api.post(f"{SESSIONS}/{sid}/message", json={"text": "x"}, headers=auth)
+    url = f"{SESSIONS}/{sid}/complete"
+
+    assert (await api.post(url, json={})).status_code == 401
+    # Neither the browser's token nor another container's secret can mark it done.
+    assert (await api.post(url, json={}, headers=auth)).status_code == 404
+    assert (await api.post(url, json={}, headers=agent_auth(docker_client))).status_code == 404
+    assert (await api.get(f"{SESSIONS}/{sid}", headers=auth)).json()["status"] == "running"
+    assert (await api.post(url, json={}, headers=other_agent)).status_code == 200
 
 
 async def test_delete_stops_container_and_terminates(api, docker_client):
@@ -109,7 +168,7 @@ async def test_unknown_session_is_404(api):
 
 @pytest.mark.parametrize(
     ("method", "suffix"),
-    [("get", ""), ("get", "/history"), ("delete", ""), ("post", "/complete"), ("post", "/message")],
+    [("get", ""), ("get", "/history"), ("delete", ""), ("post", "/message")],
 )
 async def test_session_routes_need_that_sessions_token(api, no_dispatch, method, suffix):
     sid, _ = await new_session(api)
@@ -209,7 +268,7 @@ async def test_startup_recovery_fails_sessions_stuck_creating(api):
     from services.session_manager import recover_active_sessions
 
     async with AsyncSessionLocal() as db:
-        db.add(Session(id=uuid.uuid4(), access_token_hash="0" * 64, status=SessionStatus.CREATING))
+        db.add(Session(access_token_hash="0" * 64, agent_token="1" * 64, status=SessionStatus.CREATING))
         await db.commit()
 
     await recover_active_sessions()

@@ -6,7 +6,7 @@ from services.docker_manager import DockerManager
 SPAWN = {
     "session_id": "1234abcd-0000-4000-8000-000000000000",
     "api_key": "k",
-    "session_token": "t",
+    "agent_token": "t",
     "model": "claude-sonnet-4-5-20250929",
     "tool_version": "computer_use_20250124",
 }

@@ -49,7 +49,7 @@ def no_dispatch(monkeypatch):
     """Record dispatches instead of calling the container's /run endpoint."""
     calls = []
 
-    async def fake_dispatch(session_id, container_ip, text):
+    async def fake_dispatch(session_id, container_ip, agent_token, text):
         calls.append((session_id, container_ip, text))
 
     monkeypatch.setattr("services.session_manager._dispatch", fake_dispatch)
