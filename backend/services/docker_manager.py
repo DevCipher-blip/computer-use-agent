@@ -70,6 +70,7 @@ class DockerManager:
                 environment={
                     "ANTHROPIC_API_KEY": api_key,
                     "SESSION_ID": session_id,
+                    "BACKEND_URL": settings.backend_internal_url,
                     "MODEL": model,
                     "TOOL_VERSION": tool_version,
                     "DISPLAY_NUM": "1",

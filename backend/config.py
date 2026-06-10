@@ -6,6 +6,9 @@ class Settings(BaseSettings):
     docker_network: str = "computeagent_network"
     session_agent_image: str = "computeagent/session-agent:latest"
     session_agent_port: int = 8765
+    # How session containers reach the backend for the completion callback.
+    # "backend" is the Compose service name on the shared network.
+    backend_internal_url: str = "http://backend:8000"
     vnc_base_port: int = 5900
     novnc_base_port: int = 6080
     max_concurrent_sessions: int = 20

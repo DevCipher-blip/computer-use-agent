@@ -1,5 +1,5 @@
-# Build the base image first: docker build -t cambioml/computer-use-base:latest ./computer-use-demo
-FROM cambioml/computer-use-base:latest
+# Build the base image first: docker build -t computeagent/computer-use-base:latest ./computer-use-demo
+FROM computeagent/computer-use-base:latest
 
 ENV PYTHONIOENCODING=utf-8 LANG=C.UTF-8 LC_ALL=C.UTF-8
 
