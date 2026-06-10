@@ -25,15 +25,13 @@ services:
       dockerfile: Dockerfile
     image: computeagent/backend:latest
     restart: unless-stopped
+    # Settings such as MAX_CONCURRENT_SESSIONS come from .env (see .env.example).
+    env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://cambio:${POSTGRES_PASSWORD}@postgres:5432/cambio
-      DOCKER_NETWORK: computeagent_network
-      SESSION_AGENT_IMAGE: computeagent/session-agent:latest
-      SESSION_AGENT_PORT: "8765"
-      VNC_BASE_PORT: "5900"
-      CONTAINER_READY_TIMEOUT: "90"
     volumes:
-      # Mount Docker socket so backend can spawn session containers
+      # The backend starts session containers through the host's Docker daemon.
+      # This is root-equivalent access to the host: run it only where that is acceptable.
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
       # Loopback only: browsers go through nginx; this is for /docs on the host.
