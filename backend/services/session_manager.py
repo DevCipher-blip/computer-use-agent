@@ -67,7 +67,6 @@ async def create_session(
         session.container_name = info["container_name"]
         session.container_ip = info["container_ip"]
         session.vnc_host_port = info["vnc_host_port"]
-        session.novnc_host_port = info["novnc_host_port"]
         session.status = SessionStatus.IDLE
         session.updated_at = utcnow()
         await db.commit()
@@ -164,11 +163,7 @@ async def save_assistant_message(session_id: uuid.UUID, content: list):
 
 async def terminate_session(db: AsyncSession, session: Session):
     if session.container_id:
-        await docker_manager.stop_container(
-            session.container_id,
-            session.vnc_host_port,
-            session.novnc_host_port,
-        )
+        await docker_manager.stop_container(session.container_id, session.vnc_host_port)
 
     session.status = SessionStatus.TERMINATED
     session.updated_at = utcnow()
@@ -191,5 +186,5 @@ async def recover_active_sessions():
             )
         ).all()
         for s in sessions:
-            docker_manager.recover_ports(s.vnc_host_port, s.novnc_host_port)
+            docker_manager.recover_vnc_port(s.vnc_host_port)
         logger.info(f"Recovered {len(sessions)} active sessions from DB")

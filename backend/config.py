@@ -10,13 +10,14 @@ class Settings(BaseSettings):
     # "backend" is the Compose service name on the shared network.
     backend_internal_url: str = "http://backend:8000"
     vnc_base_port: int = 5900
-    novnc_base_port: int = 6080
     max_concurrent_sessions: int = 20
     # Per-container limits so one session can't starve the host.
     session_mem_limit: str = "2g"
     session_cpus: float = 1.0
     session_pids_limit: int = 512
     container_ready_timeout: int = 90
+    # Browser origins allowed to call the API cross-origin. Empty: same-origin only (behind nginx).
+    cors_origins: list[str] = []
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

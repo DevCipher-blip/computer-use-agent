@@ -443,7 +443,7 @@
     const linkBar = document.getElementById('vncDirectLink');
     const openLink = document.getElementById('vncOpenLink');
     if (s.vnc_info && s.vnc_info.novnc_url) {
-      const u = new URL(s.vnc_info.novnc_url);
+      const u = new URL(s.vnc_info.novnc_url, location.origin);
       u.searchParams.set('resize', 'scale');
       const vncUrl = u.toString();
       panel.innerHTML = `<iframe src="${vncUrl}" allowfullscreen></iframe>`;

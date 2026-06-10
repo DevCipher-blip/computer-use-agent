@@ -41,7 +41,6 @@ def docker_client(monkeypatch):
     client.containers.get.return_value = container
     monkeypatch.setattr(docker_manager, "_client", client)
     monkeypatch.setattr(docker_manager, "_used_vnc_ports", set())
-    monkeypatch.setattr(docker_manager, "_used_novnc_ports", set())
     return client
 
 

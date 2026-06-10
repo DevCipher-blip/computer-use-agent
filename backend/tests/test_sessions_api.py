@@ -25,6 +25,10 @@ async def test_create_spawns_one_container_and_reports_vnc(api, docker_client):
     data = r.json()
     assert data["status"] == "idle"
     assert data["vnc_info"]["vnc_port"] == 5901
+    base = f"novnc/{data['id']}"
+    assert data["vnc_info"]["novnc_url"] == (
+        f"/{base}/vnc.html?autoconnect=true&resize=scale&path={base}/websockify"
+    )
 
     docker_client.containers.run.assert_called_once()
     kwargs = docker_client.containers.run.call_args.kwargs
@@ -213,3 +217,10 @@ async def test_startup_recovery_fails_sessions_stuck_creating(api):
     async with AsyncSessionLocal() as db:
         statuses = [s.status for s in await db.scalars(select(Session))]
     assert statuses == [SessionStatus.ERROR]
+
+
+async def test_cross_origin_requests_are_not_allowed_by_default(api):
+    r = await api.options(
+        SESSIONS, headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"}
+    )
+    assert "access-control-allow-origin" not in r.headers

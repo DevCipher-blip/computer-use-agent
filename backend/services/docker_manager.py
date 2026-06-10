@@ -14,7 +14,6 @@ class DockerManager:
         self._client: docker.DockerClient | None = None
         self._port_lock = asyncio.Lock()
         self._used_vnc_ports: set[int] = set()
-        self._used_novnc_ports: set[int] = set()
 
     @property
     def client(self) -> docker.DockerClient:
@@ -26,13 +25,11 @@ class DockerManager:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, func)
 
-    async def _allocate_ports(self) -> tuple[int, int]:
+    async def _allocate_vnc_port(self) -> int:
         async with self._port_lock:
-            vnc = self._next_free(self._used_vnc_ports, settings.vnc_base_port + 1, 100)
-            novnc = self._next_free(self._used_novnc_ports, settings.novnc_base_port + 1, 100)
-            self._used_vnc_ports.add(vnc)
-            self._used_novnc_ports.add(novnc)
-            return vnc, novnc
+            port = self._next_free(self._used_vnc_ports, settings.vnc_base_port + 1, 100)
+            self._used_vnc_ports.add(port)
+            return port
 
     def _next_free(self, used: set[int], start: int, count: int) -> int:
         for p in range(start, start + count):
@@ -40,16 +37,13 @@ class DockerManager:
                 return p
         raise RuntimeError(f"No free ports in [{start}, {start + count})")
 
-    async def release_ports(self, vnc: int | None, novnc: int | None):
+    async def release_vnc_port(self, port: int | None):
         async with self._port_lock:
-            self._used_vnc_ports.discard(vnc or 0)
-            self._used_novnc_ports.discard(novnc or 0)
+            self._used_vnc_ports.discard(port or 0)
 
-    def recover_ports(self, vnc: int | None, novnc: int | None):
-        if vnc:
-            self._used_vnc_ports.add(vnc)
-        if novnc:
-            self._used_novnc_ports.add(novnc)
+    def recover_vnc_port(self, port: int | None):
+        if port:
+            self._used_vnc_ports.add(port)
 
     async def spawn_session_container(
         self,
@@ -59,7 +53,7 @@ class DockerManager:
         model: str,
         tool_version: str,
     ) -> dict:
-        vnc_port, novnc_port = await self._allocate_ports()
+        vnc_port = await self._allocate_vnc_port()
         # The full id: an 8-character prefix can collide and make containers.run() fail.
         name = f"computeagent-session-{session_id}"
 
@@ -82,10 +76,9 @@ class DockerManager:
                     "LANG": "C.UTF-8",
                     "LC_ALL": "C.UTF-8",
                 },
-                ports={
-                    "5900/tcp": vnc_port,
-                    "6080/tcp": novnc_port,
-                },
+                # The VNC server has no password, so it is published on loopback only.
+                # noVNC is not published at all: nginx reaches it over the Docker network.
+                ports={"5900/tcp": ("127.0.0.1", vnc_port)},
                 network=settings.docker_network,
                 labels={"computeagent.session_id": session_id, "computeagent.managed": "true"},
                 shm_size="512m",
@@ -106,7 +99,7 @@ class DockerManager:
         try:
             container_id, container_ip = await self._run(_run)
         except Exception:
-            await self.release_ports(vnc_port, novnc_port)
+            await self.release_vnc_port(vnc_port)
             raise
 
         return {
@@ -114,14 +107,12 @@ class DockerManager:
             "container_name": name,
             "container_ip": container_ip,
             "vnc_host_port": vnc_port,
-            "novnc_host_port": novnc_port,
         }
 
     async def stop_container(
         self,
         container_id: str,
         vnc_port: int | None = None,
-        novnc_port: int | None = None,
     ):
         def _stop():
             try:
@@ -136,7 +127,7 @@ class DockerManager:
         except Exception as e:
             logger.error(f"Error stopping container {container_id}: {e}")
         finally:
-            await self.release_ports(vnc_port, novnc_port)
+            await self.release_vnc_port(vnc_port)
 
     async def is_running(self, container_id: str) -> bool:
         def _check():

@@ -32,7 +32,6 @@ class Session(Base):
     container_name = Column(String, nullable=True)
     container_ip = Column(String, nullable=True)
     vnc_host_port = Column(Integer, nullable=True)
-    novnc_host_port = Column(Integer, nullable=True)
     model = Column(String, nullable=False, default="claude-sonnet-4-5-20250929")
     provider = Column(String, nullable=False, default="anthropic")
     tool_version = Column(String, nullable=False, default="computer_use_20251124")

@@ -20,19 +20,18 @@ def manager(docker_client):
 
 
 async def test_ports_are_unique_and_released(manager):
-    first = await manager._allocate_ports()
-    second = await manager._allocate_ports()
-    assert first == (5901, 6081)
-    assert second == (5902, 6082)
+    first = await manager._allocate_vnc_port()
+    second = await manager._allocate_vnc_port()
+    assert (first, second) == (5901, 5902)
 
-    await manager.release_ports(*first)
-    assert await manager._allocate_ports() == first
+    await manager.release_vnc_port(first)
+    assert await manager._allocate_vnc_port() == first
 
 
 async def test_port_range_exhaustion_raises(manager):
     manager._used_vnc_ports.update(range(5901, 6001))
     with pytest.raises(RuntimeError, match="No free ports"):
-        await manager._allocate_ports()
+        await manager._allocate_vnc_port()
 
 
 async def test_failed_spawn_releases_ports(manager, docker_client):
@@ -40,7 +39,6 @@ async def test_failed_spawn_releases_ports(manager, docker_client):
     with pytest.raises(docker.errors.ImageNotFound):
         await manager.spawn_session_container(**SPAWN)
     assert manager._used_vnc_ports == set()
-    assert manager._used_novnc_ports == set()
 
 
 async def test_spawn_reads_ip_from_configured_network(manager):
@@ -50,15 +48,21 @@ async def test_spawn_reads_ip_from_configured_network(manager):
 
 
 async def test_stop_tolerates_missing_container(manager, docker_client):
-    vnc, novnc = await manager._allocate_ports()
+    vnc = await manager._allocate_vnc_port()
     docker_client.containers.get.side_effect = docker.errors.NotFound("gone")
-    await manager.stop_container("c0ffee", vnc, novnc)
+    await manager.stop_container("c0ffee", vnc)
     assert manager._used_vnc_ports == set()
 
 
 async def test_recovered_ports_are_not_reused(manager):
-    manager.recover_ports(5901, 6081)
-    assert await manager._allocate_ports() == (5902, 6082)
+    manager.recover_vnc_port(5901)
+    assert await manager._allocate_vnc_port() == 5902
+
+
+async def test_only_vnc_is_published_and_only_on_loopback(manager, docker_client):
+    await manager.spawn_session_container(**SPAWN)
+    ports = docker_client.containers.run.call_args.kwargs["ports"]
+    assert ports == {"5900/tcp": ("127.0.0.1", 5901)}
 
 
 async def test_container_uses_full_session_id_and_resource_limits(manager, docker_client):

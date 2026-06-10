@@ -24,13 +24,16 @@ from services.session_manager import (
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 
-def _to_response(session: Session, host: str = "localhost") -> SessionResponse:
+def _to_response(session: Session) -> SessionResponse:
     vnc_info = None
-    if session.vnc_host_port and session.novnc_host_port:
+    if session.vnc_host_port and session.container_name:
+        # Relative, so it works from whatever host the UI was loaded from; nginx
+        # proxies /novnc/{id}/ to the container by name.
+        base = f"novnc/{session.id}"
         vnc_info = VNCInfo(
-            vnc_host=host,
+            vnc_host="127.0.0.1",
             vnc_port=session.vnc_host_port,
-            novnc_url=f"http://{host}/novnc/{session.novnc_host_port}/vnc.html?autoconnect=true&resize=scale&path=novnc/{session.novnc_host_port}/websockify",
+            novnc_url=f"/{base}/vnc.html?autoconnect=true&resize=scale&path={base}/websockify",
         )
     return SessionResponse(
         id=session.id,
