@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cambio
+      POSTGRES_PASSWORD: cambio
+      POSTGRES_DB: cambio
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cambio -d cambio"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cambioml_network
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: cambioml/backend:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://cambio:cambio@postgres:5432/cambio
+      DOCKER_NETWORK: cambioml_network
+      SESSION_AGENT_IMAGE: cambioml/session-agent:latest
+      SESSION_AGENT_PORT: "8765"
+      VNC_BASE_PORT: "5900"
+      NOVNC_BASE_PORT: "6080"
+      CONTAINER_READY_TIMEOUT: "90"
+    volumes:
+      # Mount Docker socket so backend can spawn session containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - cambioml_network
+
+  # ── Nginx (reverse proxy + static frontend) ───────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+    networks:
+      - cambioml_network
+
+networks:
+  cambioml_network:
+    driver: bridge
+    name: cambioml_network
+
+volumes:
+  postgres_data:
