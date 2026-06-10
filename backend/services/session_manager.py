@@ -3,7 +3,7 @@ import logging
 import uuid
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -13,6 +13,18 @@ from security import new_session_token
 from services.docker_manager import docker_manager
 
 logger = logging.getLogger(__name__)
+
+ACTIVE_STATUSES = (SessionStatus.CREATING, SessionStatus.IDLE, SessionStatus.RUNNING)
+
+# Serialises the "count active sessions, then insert" check. The backend runs
+# as a single uvicorn worker, so a process-local lock is enough.
+_create_lock = asyncio.Lock()
+# Keep references so fire-and-forget dispatch tasks aren't garbage-collected mid-flight.
+_background_tasks: set[asyncio.Task] = set()
+
+
+class SessionLimitReached(Exception):
+    pass
 
 
 async def create_session(
@@ -24,17 +36,24 @@ async def create_session(
 ) -> tuple[Session, str]:
     """Create the session row and its container; returns the session and its one-time token."""
     token, token_hash = new_session_token()
-    session = Session(
-        id=uuid.uuid4(),
-        access_token_hash=token_hash,
-        status=SessionStatus.CREATING,
-        model=model,
-        provider=provider,
-        tool_version=tool_version,
-    )
-    db.add(session)
-    await db.commit()
-    await db.refresh(session)
+    async with _create_lock:
+        active = await db.scalar(
+            select(func.count()).select_from(Session).where(Session.status.in_(ACTIVE_STATUSES))
+        )
+        if active >= settings.max_concurrent_sessions:
+            limit = settings.max_concurrent_sessions
+            raise SessionLimitReached(f"{active} sessions are active (limit {limit}); terminate one first")
+        session = Session(
+            id=uuid.uuid4(),
+            access_token_hash=token_hash,
+            status=SessionStatus.CREATING,
+            model=model,
+            provider=provider,
+            tool_version=tool_version,
+        )
+        db.add(session)
+        await db.commit()
+        await db.refresh(session)
 
     try:
         info = await docker_manager.spawn_session_container(
@@ -64,17 +83,25 @@ async def create_session(
 
 
 async def send_message_to_session(db: AsyncSession, session: Session, text: str) -> Message:
-    if session.status != SessionStatus.IDLE:
+    # Compare-and-set in one UPDATE so two simultaneous requests can't both start a run.
+    claimed = await db.execute(
+        update(Session)
+        .where(Session.id == session.id, Session.status == SessionStatus.IDLE)
+        .values(status=SessionStatus.RUNNING, updated_at=utcnow())
+    )
+    if claimed.rowcount != 1:
+        await db.rollback()
+        await db.refresh(session)
         raise ValueError(f"Session not idle (status: {session.status.value})")
 
     msg = Message(session_id=session.id, role="user", content=[{"type": "text", "text": text}])
     db.add(msg)
-    session.status = SessionStatus.RUNNING
-    session.updated_at = utcnow()
     await db.commit()
     await db.refresh(msg)
 
-    asyncio.create_task(_dispatch(session.id, session.container_ip, text))
+    task = asyncio.create_task(_dispatch(session.id, session.container_ip, text))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return msg
 
 
@@ -150,12 +177,19 @@ async def terminate_session(db: AsyncSession, session: Session):
 
 async def recover_active_sessions():
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Session).where(
-                Session.status.in_([SessionStatus.IDLE, SessionStatus.RUNNING, SessionStatus.CREATING])
-            )
+        # A session still "creating" at startup lost its spawn call with the old process;
+        # left alone it would count against the session limit forever.
+        await db.execute(
+            update(Session)
+            .where(Session.status == SessionStatus.CREATING)
+            .values(status=SessionStatus.ERROR, updated_at=utcnow())
         )
-        sessions = result.scalars().all()
+        await db.commit()
+        sessions = (
+            await db.scalars(
+                select(Session).where(Session.status.in_([SessionStatus.IDLE, SessionStatus.RUNNING]))
+            )
+        ).all()
         for s in sessions:
             docker_manager.recover_ports(s.vnc_host_port, s.novnc_host_port)
         logger.info(f"Recovered {len(sessions)} active sessions from DB")

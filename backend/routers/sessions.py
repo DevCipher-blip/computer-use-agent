@@ -14,7 +14,12 @@ from schemas import (
     VNCInfo,
 )
 from security import authorized_session
-from services.session_manager import create_session, send_message_to_session, terminate_session
+from services.session_manager import (
+    SessionLimitReached,
+    create_session,
+    send_message_to_session,
+    terminate_session,
+)
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
@@ -41,13 +46,16 @@ def _to_response(session: Session, host: str = "localhost") -> SessionResponse:
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=CreatedSessionResponse)
 async def create(body: CreateSessionRequest, db: AsyncSession = Depends(get_db)):
-    session, token = await create_session(
-        db,
-        api_key=body.api_key,
-        model=body.model,
-        provider=body.provider,
-        tool_version=body.tool_version,
-    )
+    try:
+        session, token = await create_session(
+            db,
+            api_key=body.api_key,
+            model=body.model,
+            provider=body.provider,
+            tool_version=body.tool_version,
+        )
+    except SessionLimitReached as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e)) from e
     return CreatedSessionResponse(**_to_response(session).model_dump(), access_token=token)
 
 

@@ -160,3 +160,56 @@ async def test_empty_task_is_rejected(api, no_dispatch):
 
 async def test_health(api):
     assert (await api.get("/health")).json() == {"status": "ok"}
+
+
+async def test_session_limit_is_enforced_and_terminating_frees_a_slot(api, docker_client, monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "max_concurrent_sessions", 2)
+    first, first_auth = await new_session(api)
+    await new_session(api)
+
+    refused = await create(api)
+    assert refused.status_code == 429
+    assert "limit 2" in refused.json()["detail"]
+    assert docker_client.containers.run.call_count == 2
+
+    await api.delete(f"{SESSIONS}/{first}", headers=first_auth)
+    assert (await create(api)).status_code == 201
+
+
+async def test_failed_sessions_do_not_count_against_the_limit(api, docker_client, monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "max_concurrent_sessions", 1)
+    docker_client.containers.run.side_effect = docker.errors.APIError("boom")
+    assert (await create(api)).status_code == 500
+    docker_client.containers.run.side_effect = None
+    assert (await create(api)).status_code == 201
+
+
+async def test_simultaneous_messages_start_only_one_run(api, no_dispatch):
+    sid, auth = await new_session(api)
+    url = f"{SESSIONS}/{sid}/message"
+    results = await asyncio.gather(
+        *(api.post(url, json={"text": f"task {i}"}, headers=auth) for i in range(5))
+    )
+    assert sorted(r.status_code for r in results) == [202, 400, 400, 400, 400]
+    await asyncio.sleep(0)
+    assert len(no_dispatch) == 1
+
+
+async def test_startup_recovery_fails_sessions_stuck_creating(api):
+    from database import AsyncSessionLocal
+    from models import Session, SessionStatus
+    from services.session_manager import recover_active_sessions
+
+    async with AsyncSessionLocal() as db:
+        db.add(Session(id=uuid.uuid4(), access_token_hash="0" * 64, status=SessionStatus.CREATING))
+        await db.commit()
+
+    await recover_active_sessions()
+
+    async with AsyncSessionLocal() as db:
+        statuses = [s.status for s in await db.scalars(select(Session))]
+    assert statuses == [SessionStatus.ERROR]

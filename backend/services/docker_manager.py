@@ -60,7 +60,8 @@ class DockerManager:
         tool_version: str,
     ) -> dict:
         vnc_port, novnc_port = await self._allocate_ports()
-        name = f"computeagent-{session_id[:8]}"
+        # The full id: an 8-character prefix can collide and make containers.run() fail.
+        name = f"computeagent-session-{session_id}"
 
         def _run():
             c = self.client.containers.run(
@@ -86,12 +87,20 @@ class DockerManager:
                     "6080/tcp": novnc_port,
                 },
                 network=settings.docker_network,
-                labels={"computeagent.session_id": session_id},
+                labels={"computeagent.session_id": session_id, "computeagent.managed": "true"},
                 shm_size="512m",
+                mem_limit=settings.session_mem_limit,
+                nano_cpus=int(settings.session_cpus * 1e9),
+                pids_limit=settings.session_pids_limit,
             )
-            c.reload()
-            networks = c.attrs["NetworkSettings"]["Networks"]
-            ip = networks.get(settings.docker_network, {}).get("IPAddress", "")
+            try:
+                c.reload()
+                networks = c.attrs["NetworkSettings"]["Networks"]
+                ip = networks[settings.docker_network]["IPAddress"]
+            except Exception:
+                # Don't leave a running container (holding the API key) that no session row points at.
+                c.remove(force=True)
+                raise
             return c.id, ip
 
         try:

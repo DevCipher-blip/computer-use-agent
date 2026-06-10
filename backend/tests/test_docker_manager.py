@@ -59,3 +59,22 @@ async def test_stop_tolerates_missing_container(manager, docker_client):
 async def test_recovered_ports_are_not_reused(manager):
     manager.recover_ports(5901, 6081)
     assert await manager._allocate_ports() == (5902, 6082)
+
+
+async def test_container_uses_full_session_id_and_resource_limits(manager, docker_client):
+    info = await manager.spawn_session_container(**SPAWN)
+    kwargs = docker_client.containers.run.call_args.kwargs
+    assert kwargs["name"] == f"computeagent-session-{SPAWN['session_id']}"
+    assert info["container_name"] == kwargs["name"]
+    assert kwargs["mem_limit"] == "2g"
+    assert kwargs["nano_cpus"] == 1_000_000_000
+    assert kwargs["pids_limit"] == 512
+
+
+async def test_container_is_removed_if_it_never_joins_the_network(manager, docker_client):
+    container = docker_client.containers.run.return_value
+    container.attrs = {"NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}}}
+    with pytest.raises(KeyError):
+        await manager.spawn_session_container(**SPAWN)
+    container.remove.assert_called_once_with(force=True)
+    assert manager._used_vnc_ports == set()
