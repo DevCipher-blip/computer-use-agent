@@ -31,9 +31,10 @@ async def _notify_complete():
     session_id = os.environ.get("SESSION_ID", "")
     if not session_id:
         return
+    headers = {"Authorization": f"Bearer {os.environ.get('SESSION_TOKEN', '')}"}
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(f"{_BACKEND_URL}/api/v1/sessions/{session_id}/complete")
+            await client.post(f"{_BACKEND_URL}/api/v1/sessions/{session_id}/complete", headers=headers)
     except Exception as e:
         logger.warning(f"Could not notify backend of completion: {e}")
 

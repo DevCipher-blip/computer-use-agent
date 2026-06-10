@@ -3,6 +3,14 @@ import pytest
 
 from services.docker_manager import DockerManager
 
+SPAWN = {
+    "session_id": "1234abcd-0000-4000-8000-000000000000",
+    "api_key": "k",
+    "session_token": "t",
+    "model": "claude-sonnet-4-5-20250929",
+    "tool_version": "computer_use_20250124",
+}
+
 
 @pytest.fixture
 def manager(docker_client):
@@ -30,13 +38,13 @@ async def test_port_range_exhaustion_raises(manager):
 async def test_failed_spawn_releases_ports(manager, docker_client):
     docker_client.containers.run.side_effect = docker.errors.ImageNotFound("no image")
     with pytest.raises(docker.errors.ImageNotFound):
-        await manager.spawn_session_container("1234abcd-0000", "k", "m", "computer_use_20250124")
+        await manager.spawn_session_container(**SPAWN)
     assert manager._used_vnc_ports == set()
     assert manager._used_novnc_ports == set()
 
 
 async def test_spawn_reads_ip_from_configured_network(manager):
-    info = await manager.spawn_session_container("1234abcd-0000", "k", "m", "computer_use_20250124")
+    info = await manager.spawn_session_container(**SPAWN)
     assert info["container_id"] == "c0ffee"
     assert info["container_ip"] == "10.9.0.7"
 

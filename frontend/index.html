@@ -295,7 +295,21 @@
   let sessions = {};       // id → session data
   let activeId = null;     // currently viewed session id
   let ws = null;           // active WebSocket
-  let pollTimer = null;
+
+  // The API has no accounts: each session is reachable only with the token
+  // returned when it was created, so this browser keeps its own id -> token map.
+  const TOKENS_KEY = 'computeagent_session_tokens';
+  function loadTokens() {
+    try { return JSON.parse(localStorage.getItem(TOKENS_KEY)) || {}; } catch { return {}; }
+  }
+  function saveToken(id, token) {
+    const all = loadTokens();
+    if (token) all[id] = token; else delete all[id];
+    localStorage.setItem(TOKENS_KEY, JSON.stringify(all));
+  }
+  function authHeaders(id, extra = {}) {
+    return { ...extra, Authorization: `Bearer ${loadTokens()[id] || ''}` };
+  }
 
   // ── Init ────────────────────────────────────────────────────────────────────
   (async () => {
@@ -312,18 +326,20 @@
   })();
 
   async function loadSessions() {
-    try {
-      const r = await fetch(`${API}/sessions?limit=50`);
-      const data = await r.json();
-      data.sessions.forEach(s => sessions[s.id] = s);
-      renderSidebar();
-    } catch (e) { console.error('loadSessions:', e); }
+    for (const id of Object.keys(loadTokens())) {
+      try {
+        const r = await fetch(`${API}/sessions/${id}`, { headers: authHeaders(id) });
+        if (r.status === 404 || r.status === 401) { saveToken(id, null); continue; }
+        if (r.ok) sessions[id] = await r.json();
+      } catch (e) { console.error('loadSessions:', e); }
+    }
+    renderSidebar();
   }
 
   async function refreshStatuses() {
     for (const id of Object.keys(sessions)) {
       try {
-        const r = await fetch(`${API}/sessions/${id}`);
+        const r = await fetch(`${API}/sessions/${id}`, { headers: authHeaders(id) });
         if (!r.ok) continue;
         const s = await r.json();
         sessions[id] = s;
@@ -450,7 +466,7 @@
     clearTimeout(_wsReconnectTimer);
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${location.host}/api/v1/sessions/${id}/stream`;
+    const url = `${proto}://${location.host}/api/v1/sessions/${id}/stream?token=${encodeURIComponent(loadTokens()[id] || '')}`;
     ws = new WebSocket(url);
 
     ws.onmessage = ({ data }) => {
@@ -554,7 +570,7 @@
     try {
       const r = await fetch(`${API}/sessions/${activeId}/message`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(activeId, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({ text }),
       });
       if (!r.ok) {
@@ -578,7 +594,7 @@
   async function loadHistory(id) {
     const panel = document.getElementById('historyPanel');
     try {
-      const r = await fetch(`${API}/sessions/${id}/history`);
+      const r = await fetch(`${API}/sessions/${id}/history`, { headers: authHeaders(id) });
       const data = await r.json();
       panel.innerHTML = '';
       if (!data.messages.length) {
@@ -600,7 +616,7 @@
   // ── Kill session ─────────────────────────────────────────────────────────────
   async function killSession() {
     if (!activeId || !confirm('Terminate this session?')) return;
-    await fetch(`${API}/sessions/${activeId}`, { method: 'DELETE' });
+    await fetch(`${API}/sessions/${activeId}`, { method: 'DELETE', headers: authHeaders(activeId) });
     sessions[activeId].status = 'terminated';
     updateToolbar(sessions[activeId]);
     renderSidebar();
@@ -661,7 +677,8 @@
         alert(`Failed: ${e.detail}`);
         return;
       }
-      const s = await r.json();
+      const { access_token: token, ...s } = await r.json();
+      saveToken(s.id, token);
       sessions[s.id] = s;
       closeModal();
       renderSidebar();

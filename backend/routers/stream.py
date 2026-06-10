@@ -5,12 +5,12 @@ from uuid import UUID
 
 import websockets
 import websockets.exceptions
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from config import settings
 from database import AsyncSessionLocal
 from models import Session, SessionStatus
+from security import token_matches
 from services.session_manager import save_assistant_message, wait_until_ready
 
 logger = logging.getLogger(__name__)
@@ -18,13 +18,14 @@ router = APIRouter(tags=["stream"])
 
 
 @router.websocket("/api/v1/sessions/{session_id}/stream")
-async def stream_session(session_id: UUID, websocket: WebSocket):
+async def stream_session(session_id: UUID, websocket: WebSocket, token: str | None = Query(None)):
+    # Browsers can't set headers on a WebSocket handshake, so the token rides in the query string.
     await websocket.accept()
 
     async with AsyncSessionLocal() as db:
-        row = (await db.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
+        row = await db.get(Session, session_id)
 
-    if not row:
+    if row is None or not token_matches(row, token):
         await websocket.send_json({"type": "error", "message": "Session not found"})
         await websocket.close(1008)
         return

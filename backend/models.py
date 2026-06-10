@@ -27,6 +27,7 @@ class Session(Base):
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     status = Column(SAEnum(SessionStatus), nullable=False, default=SessionStatus.CREATING)
+    access_token_hash = Column(String(64), nullable=False)
     container_id = Column(String, nullable=True)
     container_name = Column(String, nullable=True)
     container_ip = Column(String, nullable=True)

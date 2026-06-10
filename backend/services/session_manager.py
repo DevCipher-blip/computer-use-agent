@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import AsyncSessionLocal
 from models import Message, Session, SessionStatus, utcnow
+from security import new_session_token
 from services.docker_manager import docker_manager
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,12 @@ async def create_session(
     model: str,
     provider: str,
     tool_version: str,
-) -> Session:
+) -> tuple[Session, str]:
+    """Create the session row and its container; returns the session and its one-time token."""
+    token, token_hash = new_session_token()
     session = Session(
         id=uuid.uuid4(),
+        access_token_hash=token_hash,
         status=SessionStatus.CREATING,
         model=model,
         provider=provider,
@@ -36,6 +40,7 @@ async def create_session(
         info = await docker_manager.spawn_session_container(
             session_id=str(session.id),
             api_key=api_key,
+            session_token=token,
             model=model,
             tool_version=tool_version,
         )
@@ -55,18 +60,14 @@ async def create_session(
         logger.error(f"Container spawn failed for session {session.id}: {e}")
         raise
 
-    return session
+    return session, token
 
 
-async def send_message_to_session(db: AsyncSession, session_id: uuid.UUID, text: str) -> Message:
-    result = await db.execute(select(Session).where(Session.id == session_id))
-    session = result.scalar_one_or_none()
-    if not session:
-        raise ValueError(f"Session {session_id} not found")
+async def send_message_to_session(db: AsyncSession, session: Session, text: str) -> Message:
     if session.status != SessionStatus.IDLE:
         raise ValueError(f"Session not idle (status: {session.status.value})")
 
-    msg = Message(session_id=session_id, role="user", content=[{"type": "text", "text": text}])
+    msg = Message(session_id=session.id, role="user", content=[{"type": "text", "text": text}])
     db.add(msg)
     session.status = SessionStatus.RUNNING
     session.updated_at = utcnow()
@@ -134,12 +135,7 @@ async def save_assistant_message(session_id: uuid.UUID, content: list):
         await db.commit()
 
 
-async def terminate_session(db: AsyncSession, session_id: uuid.UUID):
-    result = await db.execute(select(Session).where(Session.id == session_id))
-    session = result.scalar_one_or_none()
-    if not session:
-        raise ValueError(f"Session {session_id} not found")
-
+async def terminate_session(db: AsyncSession, session: Session):
     if session.container_id:
         await docker_manager.stop_container(
             session.container_id,
