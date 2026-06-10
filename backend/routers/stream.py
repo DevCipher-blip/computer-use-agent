@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from uuid import UUID
 
 import websockets
 import websockets.exceptions
@@ -10,14 +11,14 @@ from sqlalchemy import select
 from config import settings
 from database import AsyncSessionLocal
 from models import Session, SessionStatus
-from services.session_manager import _wait_ready, save_assistant_message
+from services.session_manager import save_assistant_message, wait_until_ready
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["stream"])
 
 
 @router.websocket("/api/v1/sessions/{session_id}/stream")
-async def stream_session(session_id: str, websocket: WebSocket):
+async def stream_session(session_id: UUID, websocket: WebSocket):
     await websocket.accept()
 
     async with AsyncSessionLocal() as db:
@@ -36,7 +37,7 @@ async def stream_session(session_id: str, websocket: WebSocket):
     container_ip = row.container_ip
     await websocket.send_json({"type": "status", "status": "connecting", "message": "Waiting for container…"})
 
-    ready = await _wait_ready(container_ip)
+    ready = await wait_until_ready(container_ip)
     if not ready:
         await websocket.send_json({"type": "error", "message": "Container failed to become ready"})
         await websocket.close(1011)

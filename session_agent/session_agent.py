@@ -37,6 +37,7 @@ async def _notify_complete():
     except Exception as e:
         logger.warning(f"Could not notify backend of completion: {e}")
 
+
 app = FastAPI(title="Session Agent")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -48,6 +49,7 @@ _run_lock = asyncio.Lock()
 
 
 # ── Broadcasting ───────────────────────────────────────────────────────────────
+
 
 def _broadcast_sync(event: dict):
     """Safe to call from sync callbacks inside sampling_loop (same event loop)."""
@@ -69,6 +71,7 @@ async def _broadcast(event: dict):
 
 
 # ── Serialisation helpers ──────────────────────────────────────────────────────
+
 
 def _ser_block(block: Any) -> dict:
     if isinstance(block, dict):
@@ -92,6 +95,7 @@ def _ser_tool_result(result: Any, tool_id: str) -> dict:
 
 # ── Agent loop ─────────────────────────────────────────────────────────────────
 
+
 async def _run_loop(task: str):
     global _messages, _status
 
@@ -102,6 +106,7 @@ async def _run_loop(task: str):
     await _broadcast({"type": "status", "status": "running"})
 
     try:
+
         def output_cb(block):
             _broadcast_sync({"type": "output", "data": _ser_block(block)})
 
@@ -153,6 +158,7 @@ async def _run_loop(task: str):
 
 # ── HTTP endpoints ─────────────────────────────────────────────────────────────
 
+
 class RunRequest(BaseModel):
     task: str
     session_id: str | None = None
@@ -183,6 +189,7 @@ async def get_history():
 
 # ── WebSocket stream ───────────────────────────────────────────────────────────
 
+
 @app.websocket("/stream")
 async def ws_stream(websocket: WebSocket):
     await websocket.accept()
@@ -197,7 +204,7 @@ async def ws_stream(websocket: WebSocket):
             try:
                 data = await asyncio.wait_for(queue.get(), timeout=25.0)
                 await websocket.send_text(data)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Heartbeat to keep connection alive
                 await websocket.send_text(json.dumps({"type": "ping"}))
     except (WebSocketDisconnect, Exception) as e:

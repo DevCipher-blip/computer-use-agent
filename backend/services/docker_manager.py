@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from typing import Optional
 
 import docker
 import docker.errors
@@ -12,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class DockerManager:
     def __init__(self):
-        self._client: Optional[docker.DockerClient] = None
+        self._client: docker.DockerClient | None = None
         self._port_lock = asyncio.Lock()
         self._used_vnc_ports: set[int] = set()
         self._used_novnc_ports: set[int] = set()
@@ -41,12 +40,12 @@ class DockerManager:
                 return p
         raise RuntimeError(f"No free ports in [{start}, {start + count})")
 
-    async def release_ports(self, vnc: Optional[int], novnc: Optional[int]):
+    async def release_ports(self, vnc: int | None, novnc: int | None):
         async with self._port_lock:
             self._used_vnc_ports.discard(vnc or 0)
             self._used_novnc_ports.discard(novnc or 0)
 
-    def recover_ports(self, vnc: Optional[int], novnc: Optional[int]):
+    def recover_ports(self, vnc: int | None, novnc: int | None):
         if vnc:
             self._used_vnc_ports.add(vnc)
         if novnc:
@@ -110,8 +109,8 @@ class DockerManager:
     async def stop_container(
         self,
         container_id: str,
-        vnc_port: Optional[int] = None,
-        novnc_port: Optional[int] = None,
+        vnc_port: int | None = None,
+        novnc_port: int | None = None,
     ):
         def _stop():
             try:

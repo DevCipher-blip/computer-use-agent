@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -28,7 +28,7 @@ class SessionResponse(BaseModel):
     model: str
     provider: str
     tool_version: str
-    vnc_info: Optional[VNCInfo] = None
+    vnc_info: VNCInfo | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime
 
 import httpx
 from sqlalchemy import select
@@ -9,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import AsyncSessionLocal
-from models import Message, Session, SessionStatus
+from models import Message, Session, SessionStatus, utcnow
 from services.docker_manager import docker_manager
 
 logger = logging.getLogger(__name__)
@@ -46,12 +45,12 @@ async def create_session(
         session.vnc_host_port = info["vnc_host_port"]
         session.novnc_host_port = info["novnc_host_port"]
         session.status = SessionStatus.IDLE
-        session.updated_at = datetime.utcnow()
+        session.updated_at = utcnow()
         await db.commit()
         await db.refresh(session)
     except Exception as e:
         session.status = SessionStatus.ERROR
-        session.updated_at = datetime.utcnow()
+        session.updated_at = utcnow()
         await db.commit()
         logger.error(f"Container spawn failed for session {session.id}: {e}")
         raise
@@ -59,7 +58,7 @@ async def create_session(
     return session
 
 
-async def send_message_to_session(db: AsyncSession, session_id: str, text: str) -> Message:
+async def send_message_to_session(db: AsyncSession, session_id: uuid.UUID, text: str) -> Message:
     result = await db.execute(select(Session).where(Session.id == session_id))
     session = result.scalar_one_or_none()
     if not session:
@@ -70,18 +69,16 @@ async def send_message_to_session(db: AsyncSession, session_id: str, text: str) 
     msg = Message(session_id=session_id, role="user", content=[{"type": "text", "text": text}])
     db.add(msg)
     session.status = SessionStatus.RUNNING
-    session.updated_at = datetime.utcnow()
+    session.updated_at = utcnow()
     await db.commit()
     await db.refresh(msg)
 
-    asyncio.create_task(
-        _dispatch(str(session.id), session.container_ip, text)
-    )
+    asyncio.create_task(_dispatch(session.id, session.container_ip, text))
     return msg
 
 
-async def _dispatch(session_id: str, container_ip: str, text: str):
-    ready = await _wait_ready(container_ip)
+async def _dispatch(session_id: uuid.UUID, container_ip: str, text: str):
+    ready = await wait_until_ready(container_ip)
     if not ready:
         await _set_status(session_id, SessionStatus.ERROR)
         logger.error(f"Container not ready for session {session_id}")
@@ -91,7 +88,7 @@ async def _dispatch(session_id: str, container_ip: str, text: str):
         async with httpx.AsyncClient(timeout=600.0) as client:
             resp = await client.post(
                 f"http://{container_ip}:{settings.session_agent_port}/run",
-                json={"task": text, "session_id": session_id},
+                json={"task": text, "session_id": str(session_id)},
             )
             resp.raise_for_status()
     except Exception as e:
@@ -99,7 +96,7 @@ async def _dispatch(session_id: str, container_ip: str, text: str):
         await _set_status(session_id, SessionStatus.ERROR)
 
 
-async def _wait_ready(container_ip: str, timeout: int = None) -> bool:
+async def wait_until_ready(container_ip: str, timeout: int | None = None) -> bool:
     timeout = timeout or settings.container_ready_timeout
     url = f"http://{container_ip}:{settings.session_agent_port}/health"
     deadline = asyncio.get_event_loop().time() + timeout
@@ -115,17 +112,17 @@ async def _wait_ready(container_ip: str, timeout: int = None) -> bool:
     return False
 
 
-async def _set_status(session_id: str, status: SessionStatus):
+async def _set_status(session_id: uuid.UUID, status: SessionStatus):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Session).where(Session.id == session_id))
         session = result.scalar_one_or_none()
         if session:
             session.status = status
-            session.updated_at = datetime.utcnow()
+            session.updated_at = utcnow()
             await db.commit()
 
 
-async def save_assistant_message(session_id: str, content: list):
+async def save_assistant_message(session_id: uuid.UUID, content: list):
     async with AsyncSessionLocal() as db:
         msg = Message(session_id=session_id, role="assistant", content=content)
         db.add(msg)
@@ -133,11 +130,11 @@ async def save_assistant_message(session_id: str, content: list):
         session = result.scalar_one_or_none()
         if session:
             session.status = SessionStatus.IDLE
-            session.updated_at = datetime.utcnow()
+            session.updated_at = utcnow()
         await db.commit()
 
 
-async def terminate_session(db: AsyncSession, session_id: str):
+async def terminate_session(db: AsyncSession, session_id: uuid.UUID):
     result = await db.execute(select(Session).where(Session.id == session_id))
     session = result.scalar_one_or_none()
     if not session:
@@ -151,7 +148,7 @@ async def terminate_session(db: AsyncSession, session_id: str):
         )
 
     session.status = SessionStatus.TERMINATED
-    session.updated_at = datetime.utcnow()
+    session.updated_at = utcnow()
     await db.commit()
 
 

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from database import get_db
-from models import Message, Session
+from models import Session, SessionStatus, utcnow
 from schemas import (
     CreateSessionRequest,
     HistoryResponse,
@@ -61,18 +61,16 @@ async def list_sessions(
 ):
     total = (await db.execute(select(func.count(Session.id)))).scalar_one()
     rows = (
-        await db.execute(
-            select(Session).order_by(Session.created_at.desc()).offset(skip).limit(limit)
-        )
-    ).scalars().all()
+        (await db.execute(select(Session).order_by(Session.created_at.desc()).offset(skip).limit(limit)))
+        .scalars()
+        .all()
+    )
     return SessionListResponse(sessions=[_to_response(s) for s in rows], total=total)
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
 async def get_session(session_id: UUID, db: AsyncSession = Depends(get_db)):
-    session = (
-        await db.execute(select(Session).where(Session.id == session_id))
-    ).scalar_one_or_none()
+    session = (await db.execute(select(Session).where(Session.id == session_id))).scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return _to_response(session)
@@ -85,9 +83,9 @@ async def send_message(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        msg = await send_message_to_session(db, str(session_id), body.text)
+        msg = await send_message_to_session(db, session_id, body.text)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return MessageResponse(
         id=msg.id,
         session_id=msg.session_id,
@@ -101,9 +99,7 @@ async def send_message(
 async def get_history(session_id: UUID, db: AsyncSession = Depends(get_db)):
     session = (
         await db.execute(
-            select(Session)
-            .options(selectinload(Session.messages))
-            .where(Session.id == session_id)
+            select(Session).options(selectinload(Session.messages)).where(Session.id == session_id)
         )
     ).scalar_one_or_none()
     if not session:
@@ -124,13 +120,11 @@ async def get_history(session_id: UUID, db: AsyncSession = Depends(get_db)):
 @router.post("/{session_id}/complete", status_code=200)
 async def complete_session(session_id: UUID, db: AsyncSession = Depends(get_db)):
     """Called by session_agent when the sampling loop finishes — ensures status goes back to idle."""
-    from models import SessionStatus
-    from datetime import datetime
     result = await db.execute(select(Session).where(Session.id == session_id))
     session = result.scalar_one_or_none()
     if session and session.status == SessionStatus.RUNNING:
         session.status = SessionStatus.IDLE
-        session.updated_at = datetime.utcnow()
+        session.updated_at = utcnow()
         await db.commit()
     return {"status": "ok"}
 
@@ -138,6 +132,6 @@ async def complete_session(session_id: UUID, db: AsyncSession = Depends(get_db))
 @router.delete("/{session_id}", status_code=204)
 async def delete_session(session_id: UUID, db: AsyncSession = Depends(get_db)):
     try:
-        await terminate_session(db, str(session_id))
+        await terminate_session(db, session_id)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
