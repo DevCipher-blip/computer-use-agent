@@ -22,8 +22,7 @@ class DockerManager:
         return self._client
 
     async def _run(self, func):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, func)
+        return await asyncio.get_running_loop().run_in_executor(None, func)
 
     async def _allocate_vnc_port(self) -> int:
         async with self._port_lock:

@@ -134,9 +134,10 @@ async def _dispatch(session_id: uuid.UUID, container_ip: str, agent_token: str, 
 async def wait_until_ready(container_ip: str, timeout: int | None = None) -> bool:
     timeout = timeout or settings.container_ready_timeout
     url = f"http://{container_ip}:{settings.session_agent_port}/health"
-    deadline = asyncio.get_event_loop().time() + timeout
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     async with httpx.AsyncClient(timeout=2.0) as client:
-        while asyncio.get_event_loop().time() < deadline:
+        while loop.time() < deadline:
             try:
                 r = await client.get(url)
                 if r.status_code == 200:
@@ -176,6 +177,8 @@ async def complete_run(db: AsyncSession, session: Session, messages: list[dict],
 
 
 async def terminate_session(db: AsyncSession, session: Session):
+    if session.status == SessionStatus.TERMINATED:
+        return
     if session.container_id:
         await docker_manager.stop_container(session.container_id, session.vnc_host_port)
 

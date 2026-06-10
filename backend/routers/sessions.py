@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from models import Message, Session
+from models import Message, Session, SessionStatus
 from schemas import (
     CompleteRunRequest,
     CreatedSessionResponse,
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 def _to_response(session: Session) -> SessionResponse:
     vnc_info = None
-    if session.vnc_host_port and session.container_name:
+    if session.vnc_host_port and session.container_name and session.status != SessionStatus.TERMINATED:
         # Relative, so it works from whatever host the UI was loaded from; nginx
         # proxies /novnc/{id}/ to the container by name.
         base = f"novnc/{session.id}"

@@ -155,7 +155,13 @@ async def test_delete_stops_container_and_terminates(api, docker_client):
     assert r.status_code == 204
     docker_client.containers.get.assert_called_with("c0ffee")
     docker_client.containers.get.return_value.remove.assert_called_once_with(force=True)
-    assert (await api.get(f"{SESSIONS}/{sid}", headers=auth)).json()["status"] == "terminated"
+    after = (await api.get(f"{SESSIONS}/{sid}", headers=auth)).json()
+    assert after["status"] == "terminated"
+    assert after["vnc_info"] is None
+
+    # A second delete is a no-op, not another Docker call.
+    assert (await api.delete(f"{SESSIONS}/{sid}", headers=auth)).status_code == 204
+    assert docker_client.containers.get.call_count == 1
 
 
 async def test_unknown_session_is_404(api):
