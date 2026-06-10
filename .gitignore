@@ -1,0 +1,47 @@
+# Environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local environments and generated files
+env/
+project_venv/
+node_modules/
+*.pyc
+.pytest_cache/
+.env.*
+!.env.example
+!.env.sample
+
+# Tooling caches, test output and scratch
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage/
+test-results/
+playwright-report/
+tmp/
+logs/
+.github/
