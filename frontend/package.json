@@ -1,0 +1,23 @@
+{
+  "name": "computeagent-frontend",
+  "private": true,
+  "description": "Static UI served by nginx from public/; this file only drives tests and lint.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.14.0",
+    "globals": "17.14.0",
+    "jsdom": "31.0.0",
+    "vitest": "5.1.0"
+  },
+  "overrides": {
+    "minimatch": "^11.0.5"
+  }
+}

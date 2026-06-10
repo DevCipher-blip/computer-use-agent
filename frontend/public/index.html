@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ComputeAgent — computer-use sessions</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand-name">ComputeAgent</span>
+  <span class="brand-sub">Isolated computer-use sessions for Claude</span>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" aria-labelledby="sessionsHeading">
+    <div class="sidebar-head">
+      <h2 id="sessionsHeading">Sessions</h2>
+      <button type="button" class="btn btn-primary" id="newSessionBtn">New session</button>
+    </div>
+    <div class="list-state" id="sessionsState" role="status">Loading sessions…</div>
+    <ul class="session-list" id="sessionsList"></ul>
+
+    <form class="key-form" id="apiKeyForm">
+      <label for="apiKeyInput">Anthropic API key</label>
+      <div class="key-row">
+        <input type="password" id="apiKeyInput" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" />
+        <button type="submit" class="btn">Save</button>
+      </div>
+      <label class="check"><input type="checkbox" id="rememberKey" /> Remember on this device</label>
+      <p class="hint" id="apiKeyStatus" role="status"></p>
+    </form>
+  </aside>
+
+  <main class="main">
+    <section class="welcome" id="welcome" aria-labelledby="welcomeHeading">
+      <h1 id="welcomeHeading">Give Claude a desktop of its own</h1>
+      <p>Each session starts an isolated container with a virtual desktop. Send it a task and follow every
+        screenshot and tool call as it happens, or watch the desktop live.</p>
+      <ol class="steps">
+        <li>Save your Anthropic API key in the sidebar.</li>
+        <li>Start a session and pick a model.</li>
+        <li>Describe a task in plain language.</li>
+      </ol>
+    </section>
+
+    <section class="session-view" id="sessionView" aria-labelledby="toolbarId" hidden>
+      <div class="toolbar">
+        <h2><span class="mono" id="toolbarId"></span></h2>
+        <span class="meta" id="toolbarModel"></span>
+        <span class="badge" id="toolbarStatus" role="status"></span>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-danger" id="terminateBtn">Terminate</button>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Session views">
+        <button type="button" role="tab" id="tab-feed" aria-controls="panel-feed" aria-selected="true">Agent feed</button>
+        <button type="button" role="tab" id="tab-vnc" aria-controls="panel-vnc" aria-selected="false" tabindex="-1">Live desktop</button>
+        <button type="button" role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1">History</button>
+      </div>
+
+      <div class="panel" id="panel-feed" role="tabpanel" aria-labelledby="tab-feed">
+        <ol class="feed" id="feed" aria-label="Agent activity"></ol>
+        <p class="empty" id="feedEmpty">No activity yet. Send a task below.</p>
+        <form class="task-bar" id="taskForm">
+          <label for="taskInput" class="sr-only">Task for Claude</label>
+          <textarea id="taskInput" rows="2" placeholder="Describe a task, e.g. “Open Firefox and look up the weather in Dubai”"></textarea>
+          <button type="submit" class="btn btn-primary" id="sendBtn">Send</button>
+          <p class="hint" id="taskHint" role="status">Enter sends, Shift+Enter adds a line.</p>
+        </form>
+      </div>
+
+      <div class="panel" id="panel-vnc" role="tabpanel" aria-labelledby="tab-vnc" hidden>
+        <div class="vnc" id="vncPanel"></div>
+        <p class="vnc-link" id="vncLinkRow" hidden>
+          Desktop blank? <a id="vncOpenLink" href="#" target="_blank" rel="noopener">Open it in a new tab</a>
+        </p>
+      </div>
+
+      <div class="panel" id="panel-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+        <div class="history" id="historyPanel" aria-live="polite"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="newSessionDialog" aria-labelledby="newSessionHeading">
+  <form id="newSessionForm">
+    <h2 id="newSessionHeading">New session</h2>
+    <label for="modelSelect">Model</label>
+    <select id="modelSelect">
+      <option value="claude-sonnet-4-5-20250929" data-tool="computer_use_20250124">Claude Sonnet 4.5</option>
+      <option value="claude-opus-4-5-20251101" data-tool="computer_use_20251124">Claude Opus 4.5</option>
+      <option value="claude-haiku-4-5-20251001" data-tool="computer_use_20250124">Claude Haiku 4.5</option>
+    </select>
+    <label for="toolVersion">Computer-use tool version</label>
+    <select id="toolVersion">
+      <option value="computer_use_20250124">computer_use_20250124</option>
+      <option value="computer_use_20251124">computer_use_20251124 (Opus 4.5)</option>
+      <option value="computer_use_20241022">computer_use_20241022 (legacy)</option>
+    </select>
+    <p class="field-note">Picking a model selects the tool version it supports.</p>
+    <p class="error" id="createError" role="alert" hidden></p>
+    <div class="actions">
+      <button type="button" class="btn" id="cancelCreate">Cancel</button>
+      <button type="submit" class="btn btn-primary" id="createBtn">Start session</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="lightbox" aria-label="Screenshot">
+  <img id="lightboxImg" src="data:," alt="Full-size screenshot from the session desktop" />
+  <div class="actions"><button type="button" class="btn" id="closeLightbox">Close</button></div>
+</dialog>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
