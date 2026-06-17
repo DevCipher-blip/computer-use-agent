@@ -3,8 +3,8 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://cambio:cambio@postgres:5432/cambio"
-    docker_network: str = "cambioml_network"
-    session_agent_image: str = "cambioml/session-agent:latest"
+    docker_network: str = "computeagent_network"
+    session_agent_image: str = "computeagent/session-agent:latest"
     session_agent_port: int = 8765
     vnc_base_port: int = 5900
     novnc_base_port: int = 6080

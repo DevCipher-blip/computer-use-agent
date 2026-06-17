@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="CambioML Computer Use Agent API",
+    title="ComputeAgent Computer Use Agent API",
     description=(
         "Scalable backend for Claude computer-use agent session management. "
         "Each session runs in an isolated Docker container with a full virtual desktop."

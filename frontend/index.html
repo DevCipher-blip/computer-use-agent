@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CambioML — Computer Use Agent</title>
+  <title>ComputeAgent — Computer Use Agent</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -173,7 +173,7 @@
 <body>
 
 <header>
-  <span class="logo">CambioML</span>
+  <span class="logo">ComputeAgent</span>
   <span class="subtitle">Computer Use Agent</span>
   <span class="spacer"></span>
   <span class="pill">Powered by Claude</span>
@@ -299,7 +299,7 @@
 
   // ── Init ────────────────────────────────────────────────────────────────────
   (async () => {
-    const saved = localStorage.getItem('cambio_api_key');
+    const saved = localStorage.getItem('computeagent_api_key');
     if (saved) {
       document.getElementById('globalApiKey').value = saved;
       const st = document.getElementById('apiKeyStatus');
@@ -618,7 +618,7 @@
       setTimeout(() => { st.textContent = ''; }, 4000);
       return;
     }
-    localStorage.setItem('cambio_api_key', val);
+    localStorage.setItem('computeagent_api_key', val);
     const st = document.getElementById('apiKeyStatus');
     st.textContent = '✓ Saved';
     st.style.color = 'var(--green)';
@@ -626,7 +626,7 @@
   }
 
   function openModal() {
-    const key = localStorage.getItem('cambio_api_key');
+    const key = localStorage.getItem('computeagent_api_key');
     if (!key) {
       alert('Enter your Anthropic API key in the sidebar first.');
       document.getElementById('globalApiKey').focus();
@@ -638,7 +638,7 @@
   function closeModal() { document.getElementById('modal').classList.remove('open'); }
 
   async function createSession() {
-    const apiKey = localStorage.getItem('cambio_api_key');
+    const apiKey = localStorage.getItem('computeagent_api_key');
     if (!apiKey) { alert('Enter your API key in the sidebar first.'); return; }
 
     const btn = document.getElementById('createBtn');

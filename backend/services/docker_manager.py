@@ -60,7 +60,7 @@ class DockerManager:
         tool_version: str,
     ) -> dict:
         vnc_port, novnc_port = await self._allocate_ports()
-        name = f"cambio-{session_id[:8]}"
+        name = f"computeagent-{session_id[:8]}"
 
         def _run():
             c = self.client.containers.run(
@@ -84,7 +84,7 @@ class DockerManager:
                     "6080/tcp": novnc_port,
                 },
                 network=settings.docker_network,
-                labels={"cambio.session_id": session_id},
+                labels={"computeagent.session_id": session_id},
                 shm_size="512m",
             )
             c.reload()

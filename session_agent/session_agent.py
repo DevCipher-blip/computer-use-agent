@@ -24,7 +24,7 @@ from computer_use_demo.loop import APIProvider, sampling_loop  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("session_agent")
 
-_BACKEND_URL = os.environ.get("BACKEND_URL", "http://cambioml-backend-1:8000")
+_BACKEND_URL = os.environ.get("BACKEND_URL", "http://computeagent-backend-1:8000")
 
 
 async def _notify_complete():

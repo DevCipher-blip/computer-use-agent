@@ -1,21 +1,8 @@
 Author: Hamna Anwar
 
-# CambioML — Scalable Computer Use Agent Platform
+# ComputeAgent — Scalable Computer Use Agent Platform
 
 A production-ready backend that replaces the experimental Streamlit interface from [anthropic-quickstarts/computer-use-demo](https://github.com/anthropics/anthropic-quickstarts/tree/main/computer-use-demo) with a fully scalable, concurrent, real-time architecture. Each session runs in its own isolated Docker container with a complete virtual desktop controlled by Claude.
-
----
-
-## Demo Video
-
-> 📹 **[Watch the 5-minute demo here](https://www.loom.com/share/5d706c7a97e946d99398a6aabc4b880e)**
-
-The demo covers:
-- Repository and codebase walkthrough
-- Service launch and live API endpoint verification
-- **Use Case 1:** Real-time weather search in Dubai — Firefox automation with live streaming
-- **Use Case 2:** Strictly non-blocking concurrent sessions — Tokyo and New York weather searched simultaneously in two separate containers
-- Streamlit-like UI behavior — real-time step streaming and automatic next-task prompt
 
 ---
 
@@ -166,8 +153,8 @@ sequenceDiagram
 
 ```bash
 # Clone the repository
-git clone https://github.com/debugger-dr/cambioml-computer-use.git
-cd cambioml-computer-use
+git clone https://github.com/debugger-dr/computeagent-computer-use.git
+cd computeagent-computer-use
 
 # Build all images and start the full stack (~5–10 min on first run)
 make up
@@ -291,7 +278,7 @@ async def spawn_session_container(self, session_id, api_key, model, tool_version
     vnc_port, novnc_port = await self._allocate_ports()   # asyncio.Lock protected
     container = self.client.containers.run(
         image=settings.session_agent_image,
-        name=f"cambio-{session_id[:8]}",
+        name=f"computeagent-{session_id[:8]}",
         detach=True,
         network=settings.docker_network,
         ...
@@ -322,7 +309,7 @@ An `asyncio.Lock` ensures that even if two session-create requests arrive at the
 ## Project Structure
 
 ```
-cambioml-computer-use/
+computeagent-computer-use/
 │
 ├── backend/                        FastAPI application
 │   ├── main.py                     App entry-point, lifespan hooks
@@ -365,8 +352,8 @@ All settings are environment variables. Copy `.env.example` to `.env` to overrid
 | Variable | Default | Description |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://cambio:cambio@postgres/cambio` | Async PostgreSQL connection string |
-| `DOCKER_NETWORK` | `cambioml_network` | Docker network shared by backend and session containers |
-| `SESSION_AGENT_IMAGE` | `cambioml/session-agent:latest` | Container image spawned per session |
+| `DOCKER_NETWORK` | `computeagent_network` | Docker network shared by backend and session containers |
+| `SESSION_AGENT_IMAGE` | `computeagent/session-agent:latest` | Container image spawned per session |
 | `SESSION_AGENT_PORT` | `8765` | Internal HTTP/WS port for the session agent |
 | `VNC_BASE_PORT` | `5900` | Starting host port for VNC port allocation |
 | `NOVNC_BASE_PORT` | `6080` | Starting host port for noVNC port allocation |
