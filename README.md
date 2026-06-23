@@ -1,10 +1,10 @@
-Author: Hamna Anwar
+# Computer-use session platform
 
-# ComputeAgent — Scalable Computer Use Agent Platform
+## Trace a session before scaling it
 
-A production-ready backend that replaces the experimental Streamlit interface from [anthropic-quickstarts/computer-use-demo](https://github.com/anthropics/anthropic-quickstarts/tree/main/computer-use-demo) with a fully scalable, concurrent, real-time architecture. Each session runs in its own isolated Docker container with a complete virtual desktop controlled by Claude.
+A session moves from the HTTP API through the session manager into a dedicated agent container, with messages persisted and activity streamed back to the client. Start with [session lifecycle management](backend/services/session_manager.py) and [the Docker adapter](backend/services/docker_manager.py).
 
----
+The architecture separates orchestration from the agent loop, which makes container failures and session recovery concrete review topics. Capacity is still bounded by the Docker host, model-provider quotas, and per-session resources. Authentication, container privileges, network access, and retention of screenshots/conversation data should be explicit deployment decisions.
 
 ## Architecture Overview
 
@@ -153,7 +153,7 @@ sequenceDiagram
 
 ```bash
 # Clone the repository
-git clone https://github.com/debugger-dr/computeagent-computer-use.git
+git clone https://github.com/DevCipher-blip/computer-use-agent.git
 cd computeagent-computer-use
 
 # Build all images and start the full stack (~5–10 min on first run)
